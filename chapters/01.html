@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>01 이미지가 토큰이 되기까지 — VLM 워크북</title>
+<meta name="description" content="ViT의 패치 분할부터 이미지 토큰 수와 어텐션 비용까지, 직접 만져보며 배우는 VLM 입문 1장.">
+<script>try{var t=localStorage.getItem('vlmwb_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="../assets/css/base.css">
+</head>
+<body data-chapter="01">
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+<div class="wrap">
+<nav class="rail" aria-label="목차"></nav>
+
+<main id="main">
+  <div class="eyebrow">CHAPTER 01</div>
+  <h1>이미지가 토큰이 되기까지</h1>
+  <p class="lede">언어 모델은 문장을 토큰 조각으로 읽는다. 그렇다면 이미지는? — 답은 의외로 단순하다. <b>이미지도 조각내서 토큰인 척 시킨다.</b> 이 장에서는 그 조각내기(패치)가 정확히 무엇이고, 왜 VLM의 비용과 성능이 전부 여기서 결정되는지를 손으로 만져본다.</p>
+
+  <h2>1. 패치 — 이미지의 "단어"</h2>
+  <p>ViT(Vision Transformer)는 이미지를 <span class="tok v">16×16</span>픽셀짜리 정사각 조각으로 자른다. 각 조각을 펴서 벡터로 만들면, 트랜스포머 입장에서는 문장 속 단어와 다를 게 없는 <strong>시퀀스의 원소</strong>가 된다. 224×224 이미지를 16픽셀 패치로 자르면 14×14 = <span class="tok v">196개</span>의 이미지 토큰이 나온다.</p>
+  <p>여기서 첫 번째 통찰: <strong>패치 크기와 해상도가 토큰 수를 결정하고, 토큰 수가 곧 비용이다.</strong> 어텐션 연산은 토큰 수의 제곱으로 비싸진다. 아래에서 직접 조절해보자.</p>
+
+  <div class="lab">
+    <div class="lab-tag">LAB 1-1 · 직접 잘라보기</div>
+    <h3>패치 분할 실습</h3>
+    <p class="hint">해상도와 패치 크기를 바꾸면 토큰 수와 어텐션 비용이 어떻게 움직이는지 관찰하세요.</p>
+    <div class="row">
+      <div><canvas id="cv" width="336" height="336" aria-label="패치 격자가 그려진 합성 장면"></canvas></div>
+      <div class="ctl">
+        <div><label for="res">입력 해상도 <b id="resV">336px</b></label>
+          <input type="range" id="res" min="0" max="3" step="1" value="1"></div>
+        <div><label for="pat">패치 크기 <b id="patV">16px</b></label>
+          <input type="range" id="pat" min="0" max="2" step="1" value="1"></div>
+        <div class="stat">
+          이미지 토큰 <b id="ntok">441</b><br>
+          어텐션 비용(토큰²) <span id="cost" class="warn">194k</span><br>
+          격자 <span id="grid">21 × 21</span>
+        </div>
+      </div>
+    </div>
+    <div class="seq" id="seq" aria-label="LLM에 들어가는 시퀀스"></div>
+    <p class="hint" style="margin:10px 0 0">위 칩들이 LLM이 실제로 받는 시퀀스다 — <span class="tok l">텍스트 토큰</span> 뒤에 <span class="tok v">이미지 토큰</span>이 그냥 이어붙는다.</p>
+  </div>
+
+  <h2>2. 왜 "제곱"이 무서운가</h2>
+  <p>해상도를 224에서 448로 <em>2배</em> 올리면 토큰은 196개에서 784개로 <em>4배</em>가 되고, 어텐션 비용은 대략 <em>16배</em>가 된다. 그래서 모든 VLM 설계는 결국 하나의 질문으로 수렴한다 — <strong>"토큰 예산을 어디에 쓸 것인가."</strong> 작은 글자를 읽어야 하는 문서 이해는 해상도가 곧 성능이지만, "고양이가 있나요" 수준의 질문에 784토큰은 낭비다.</p>
+  <p>최신 모델들이 자랑하는 기법들 — 동적 해상도, 타일 분할, 토큰 압축 — 은 전부 이 예산 문제에 대한 서로 다른 답이다. 3장에서 이 트레이드오프 곡선을 직접 그려본다.</p>
+
+  <h2>3. 확인 문제</h2>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 1-1</div>
+    <p class="q">672×672 이미지를 14픽셀 패치로 자르면 이미지 토큰은 몇 개인가?</p>
+    <div class="opts" id="q1">
+      <button type="button" data-a="0">48개 — 672 ÷ 14</button>
+      <button type="button" data-a="1">2,304개 — (672÷14)²</button>
+      <button type="button" data-a="0">196개 — 표준 ViT는 항상 196개</button>
+    </div>
+    <div class="expl" id="e1">한 변이 672÷14 = 48패치, 격자는 48×48이므로 <b>2,304개</b>. 토큰 수는 항상 "한 변의 패치 수의 제곱"으로 뛴다는 감각이 이 장의 핵심이다.</div>
+  </div>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 1-2</div>
+    <p class="q">해상도를 그대로 두고 패치 크기만 16→32로 키우면?</p>
+    <div class="opts" id="q2">
+      <button type="button" data-a="1">토큰이 ¼로 줄어 빨라지지만, 작은 물체 정보가 뭉개진다</button>
+      <button type="button" data-a="0">토큰 수는 같고 각 토큰이 더 똑똑해진다</button>
+      <button type="button" data-a="0">어텐션 비용이 2배가 된다</button>
+    </div>
+    <div class="expl" id="e2">패치가 커지면 격자가 성겨져 토큰이 ¼(비용은 ~1/16)이 되지만, 패치 하나가 32×32 영역을 통째로 요약해야 하므로 <b>세밀한 검출력이 희생된다</b>. 속도와 시력의 맞교환.</div>
+  </div>
+
+  <div class="refs">
+    <h2>더 읽을거리</h2>
+    <ol>
+      <li>Dosovitskiy et al., <a href="https://arxiv.org/abs/2010.11929">An Image is Worth 16×16 Words (ViT)</a>, ICLR 2021 — 패치 분할이라는 발상 자체의 출처.</li>
+      <li>Vaswani et al., <a href="https://arxiv.org/abs/1706.03762">Attention Is All You Need</a>, NeurIPS 2017 — 어텐션이 시퀀스 길이의 제곱인 이유.</li>
+    </ol>
+  </div>
+
+  <div class="next">다음 장 — <a href="02.html"><b>02 두 세계를 잇는 프로젝터</b></a>: 이미지 토큰은 아직 "외국어"다. 언어 모델의 임베딩 공간으로 번역하는 어댑터가 어떻게 학습되는지 본다.</div>
+
+  <footer>VLM 워크북 · 개인 학습 노트 · 인터랙티브 실습은 전부 브라우저 안에서 돕니다.</footer>
+</main>
+</div>
+
+<script defer src="../assets/js/site.js"></script>
+<script defer src="../assets/js/labs/ch01-patch.js"></script>
+</body>
+</html>
