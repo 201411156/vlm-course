@@ -11,7 +11,7 @@
   /* status: 'live' 공개 · 'draft' 집필 중 */
   var CHAPTERS = [
     { n: '01', title: '이미지가 토큰이 되기까지', status: 'live', quizzes: ['q1', 'q2'],
-      sub: '패치 분할, 토큰 수, 어텐션 비용 — VLM의 모든 비용이 여기서 결정된다.' },
+      sub: '패치 분할, 토큰 수, 어텐션 비용 — VLM의 모든 비용이 여기서 결정됩니다.' },
     { n: '02', title: '두 세계를 잇는 프로젝터', status: 'live', quizzes: ['q1', 'q2'],
       sub: '비전-언어 정렬, 그리고 linear · MLP · resampler 어댑터의 트레이드오프.' },
     { n: '03', title: '해상도와 토큰 예산', status: 'draft',
@@ -33,7 +33,7 @@
     { n: '11', title: '서빙 — 양자화와 지연', status: 'draft',
       sub: 'INT8·INT4, KV 캐시, 배치 — 지연을 만드는 것들.' },
     { n: '12', title: '소형 VLM의 역습', status: 'draft',
-      sub: '체급이 아니라 분포다 — 작은 모델이 이기는 조건.' },
+      sub: '체급이 아니라 분포입니다 — 작은 모델이 이기는 조건.' },
     { n: '13', title: '비디오 — 시간축 토큰', status: 'draft',
       sub: '프레임 샘플링과 시간 인코딩, 그리고 폭발하는 토큰 수.' },
     { n: '14', title: '에이전틱 VLM', status: 'draft',
@@ -126,7 +126,7 @@
   /* --- 퀴즈 ---------------------------------------------------------------
      마크업 규약: <div class="opts" id="q1"> 안의 button[data-a="1"] 이 정답,
      해설은 같은 번호의 <div class="expl" id="e1">.
-     페이지의 data-chapter 값으로 진행상태를 저장한다.
+     페이지의 data-chapter 값으로 진행상태를 저장합니다.
      ---------------------------------------------------------------------- */
   function initQuizzes() {
     var n = document.body.getAttribute('data-chapter') || '00';
