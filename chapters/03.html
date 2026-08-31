@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>03 해상도와 토큰 예산 — VLM 워크북</title>
+<meta name="description" content="고정 해상도의 한계부터 동적 타일링·토큰 압축·네이티브 해상도까지. 해상도를 올릴수록 성능이 포화하는 '무릎'을 직접 그려보고, 브라우저 안에서 실제 VLM으로 확인합니다.">
+<script>try{var t=localStorage.getItem('vlmwb_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="../assets/css/base.css">
+<style>
+  /* 3장 전용 — 공용 자산은 건드리지 않습니다 */
+  .bar{height:7px;border-radius:4px;background:var(--panel2);overflow:hidden;margin:8px 0 6px}
+  .bar i{display:block;height:100%;width:0;background:var(--vis);transition:width .25s ease}
+  .runrow{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .pill{font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.06em;
+    border:1px solid var(--line);border-radius:999px;padding:3px 10px;color:var(--tx3);
+    white-space:nowrap}
+  .pill.on{border-color:var(--vis);color:var(--vis)}
+  .pill.off{border-color:var(--bad);color:var(--bad)}
+  .mini{font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--tx2);
+    white-space:pre-wrap;word-break:break-word}
+  .field{font:inherit;font-size:13px;background:var(--panel2);color:var(--tx);
+    border:1px solid var(--line);border-radius:8px;padding:8px 12px;width:100%}
+  .field:focus-visible{outline:2px solid var(--vis);outline-offset:1px}
+  .ansbox{background:var(--panel2);border-radius:8px;padding:12px 14px;font-size:13.5px;
+    color:var(--tx2);min-height:20px}
+  @media (prefers-reduced-motion: reduce){ .bar i{transition:none} }
+</style>
+</head>
+<body data-chapter="03">
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+<div class="wrap">
+<nav class="rail" aria-label="목차"></nav>
+
+<main id="main">
+  <div class="eyebrow">CHAPTER 03</div>
+  <h1>해상도와 토큰 예산</h1>
+  <p class="lede">1장에서 토큰 수가 곧 비용이라는 것을 보았고, 2장에서는 그 토큰을 눌러 담는 다리들을 보았습니다. 이제 진짜 질문이 남았습니다 — <b>그 예산을 어디에 쓸 것인가.</b> 이 장은 해상도를 올릴수록 성능이 완만해지다 비용만 폭증하는 지점, 그 <b>무릎</b>을 찾는 이야기입니다.</p>
+
+  <h2>1. imgsz 스윕에서 시작합니다</h2>
+  <p>검출 모델을 다뤄봤다면 이 절차가 몸에 익어 있을 것입니다. <code>imgsz=640</code>으로 한 번, <code>1280</code>으로 한 번 돌려 보고 작은 물체 AP가 얼마나 오르는지, 대신 학습 시간과 추론 지연이 얼마나 늘어나는지를 견줍니다. 픽셀이 4배가 되니 컨볼루션 비용도 대체로 4배 — <strong>비용이 정직하게 선형으로 따라옵니다.</strong></p>
+  <p>VLM에서도 똑같은 스윕을 합니다. 다만 두 가지가 다릅니다.</p>
+  <ul>
+    <li><strong>비용이 4배에서 멈추지 않습니다.</strong> 픽셀 4배 → 시각 토큰 4배까지는 같지만, 그 토큰들은 LLM의 시퀀스 앞에 붙습니다. 어텐션은 시퀀스 길이의 제곱입니다(1장). 4배가 아니라 <em>16배 쪽</em>으로 갑니다.</li>
+    <li><strong>해상도가 학습 시점의 하이퍼파라미터가 아닙니다.</strong> <code>imgsz</code>는 한 번 정하면 끝이지만, 요즘 VLM은 <em>이미지마다 추론 시점에</em> 해상도와 토큰 수가 달라집니다. 즉 예산이 요청 단위로 흔들립니다.</li>
+  </ul>
+  <p>그래서 이 장의 결론을 먼저 적어두겠습니다. <strong>VLM에서 해상도는 성능 노브가 아니라 예산 노브입니다.</strong> 얼마를 쓸지 정하는 일이지, 얼마나 잘할지를 정하는 일이 아닙니다.</p>
+
+  <h2>2. 224라는 상자</h2>
+  <p>ViT 계열의 오랜 기본값은 224×224였습니다. 이유는 성능이 아니라 <strong>공학적 편의</strong>였습니다. 위치 임베딩이 <em>그 격자 크기에 맞춘</em> 고정 길이 테이블로 묶여 있고, 배치를 만들려면 시퀀스 길이가 같아야 하니까요. CLIP도 여기서 출발했고, 뒤에 336px 변종이 나왔습니다 — 24×24 격자, <span class="tok v">576 토큰</span>. LLaVA-1.5가 쓴 것이 이 336px 판입니다.</p>
+  <p>224가 무엇을 뜻하는지는 숫자로 보면 분명해집니다. A4 문서 한 장을 224×224로 줄이면 본문 글자 한 자의 높이가 <strong>두세 픽셀</strong>이 됩니다. 사람도 못 읽습니다. 모델이 못 읽는 것이 이상한 일이 아니라, <em>읽을 수 있는 픽셀이 애초에 남아 있지 않은</em> 것입니다.</p>
+  <p>두 번째 문제는 종횡비입니다. 고정 정사각 입력은 16:9 파노라마도, 세로로 긴 영수증도 정사각으로 눌러 넣습니다. 글자가 찌그러지고, 가로로 긴 장면에서는 좌우 끝이 잘려 나갑니다.</p>
+  <p>위치 임베딩을 보간(interpolate)해서 격자를 448이나 672로 늘리는 손은 오래전부터 있었습니다. 다만 그렇게 늘린 격자는 <strong>사전학습이 본 적 없는 배치</strong>이므로, 늘린 만큼 다시 학습해 주지 않으면 이득이 생각만큼 나오지 않습니다. 그래서 판은 다른 방향으로 갔습니다 — 인코더를 늘리는 대신, <strong>이미지를 잘라서 여러 번 넣는</strong> 쪽입니다.</p>
+
+  <h2>3. 잘라서 넣기 — 동적 해상도와 타일</h2>
+  <p>발상은 단순합니다. 224나 336짜리 인코더는 그대로 두고, 큰 이미지를 <strong>그 크기의 타일 여러 장으로 쪼개서</strong> 전부 통과시킨 뒤 토큰을 이어 붙입니다. 인코더를 새로 학습할 필요가 없고, 해상도는 타일 수만큼 올라갑니다.</p>
+
+  <h3>3-1. AnyRes — 격자 후보 중에서 고르기</h3>
+  <p>LLaVA-NeXT의 <strong>AnyRes</strong>는 미리 정해둔 격자 후보 <code>{2×2, 1×{2,3,4}, {2,3,4}×1}</code> 가운데 입력 이미지의 종횡비에 가장 가까운 것을 고릅니다. 336px 타일 기준으로 672×672, 336×1344, 1344×336 같은 배치가 나오고, 공식 발표의 표현으로는 <em>"픽셀 4배"</em>입니다. 여기에 <strong>전역 축소본(base image) 한 장</strong>을 붙입니다.</p>
+  <p>LLaVA-OneVision 논문은 이 회계를 아예 식으로 적어두었습니다 — 격자가 a×b이고 크롭 하나가 T 토큰이면 <strong>L = (a×b + 1) × T</strong>. 그 <strong>+1</strong>이 축소본입니다.</p>
+  <p>숫자를 넣어봅시다. 336px 타일 하나가 24×24 격자 = 576 토큰이고, 2×2면 타일 4장 + 축소본 1장. <span class="tok v">(4+1) × 576 = 2,880 토큰</span>입니다. 336px 단일 입력의 576에서 <strong>정확히 5배</strong>가 되었고, 어텐션 비용은 그 제곱 쪽으로 갑니다. 이 2,880이라는 수는 뒤에 나온 여러 논문(MM1·Cambrian-1·Idefics2)이 "비싼 쪽"의 기준점으로 인용하는 숫자이기도 합니다.</p>
+
+  <h3>3-2. 왜 축소본을 꼭 같이 넣을까요</h3>
+  <p>타일만 넣으면 각 타일은 <em>자기 안쪽만</em> 봅니다. 어느 타일도 "이것이 영수증 한 장"이라는 사실을 모릅니다. 전역 축소본은 <strong>배치와 맥락</strong>을 담당합니다 — 세부는 타일이, 전체 구조는 축소본이. 검출에서 FPN이 저해상도 층으로 맥락을, 고해상도 층으로 작은 물체를 맡기는 분업과 발상이 같습니다.</p>
+
+  <h3>3-3. InternVL의 dynamic high-resolution</h3>
+  <p>InternVL 1.5는 같은 아이디어를 더 크게 밀었습니다. 448px 타일을 쓰고, 종횡비에 맞춰 <strong>타일 수 자체를 이미지마다 다르게</strong> 정합니다 — 학습 때 1~12장, 테스트에서는 최대 40장(대략 4K)까지 늘어납니다. 여기에 448px로 줄인 축소본을 더합니다.</p>
+  <p>448px 타일 하나는 32×32 = 1,024 패치입니다. 2장에서 본 <strong>pixel-shuffle</strong>로 2×2를 접어 <span class="tok v">타일당 256 토큰</span>으로 줄입니다. 그래서 학습 구간의 시각 토큰은 <strong>256에서 3,328 사이</strong>(3,328 = 13 × 256, 12타일 + 축소본)이고, 테스트에서 40타일까지 밀면 10,496개가 됩니다. 압축이 없었다면 같은 12타일 + 축소본이 13,312 토큰이었을 자리입니다.</p>
+
+  <div class="note">
+    <b>타일 경계는 공짜가 아닙니다.</b> 글자나 물체가 타일 경계에 걸리면 두 타일로 쪼개져 각각 반쪽만 봅니다. 격자 후보를 여러 개 두고 종횡비로 고르는 이유의 절반이 이것이고, 나머지 절반은 빈 여백에 타일을 낭비하지 않기 위해서입니다.
+  </div>
+
+  <h2>4. 눌러 담기 — 압축과 정보 밀도</h2>
+  <p>타일을 늘리면 토큰이 선형으로 늘고 어텐션은 제곱으로 늘어납니다. 그래서 타일링을 쓰는 모델은 거의 예외 없이 <strong>압축을 같이</strong> 씁니다. 2장에서 어댑터의 관점으로 본 것들을 여기서는 <em>예산의 관점</em>으로 다시 봅니다.</p>
+
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>압축</th><th>토큰</th><th>공간 순서</th><th>해상도와의 관계</th></tr></thead>
+    <tbody>
+      <tr><td>없음 (1:1)</td><td class="num">해상도²에 비례</td><td>보존</td><td>비용이 그대로 폭발</td></tr>
+      <tr><td>Pixel-shuffle 2×2</td><td class="num">¼</td><td>보존</td><td>같은 예산으로 타일 4배</td></tr>
+      <tr><td>평균 풀링</td><td class="num">1/k²</td><td>보존</td><td>가장 싸지만 세부부터 사라짐</td></tr>
+      <tr><td>Perceiver 리샘플러</td><td class="num">M개 고정</td><td>흐려짐</td><td><b>해상도와 비용이 분리됨</b></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>여기서 중요한 것은 표의 마지막 칸입니다. <strong>리샘플러를 쓰면 해상도를 올려도 LLM 비용이 늘지 않습니다.</strong> 대신 늘어난 픽셀이 고정된 M개 안으로 <em>들어갈 자리가 없습니다</em>. 비용을 상수로 만든 대가로 <strong>해상도를 올리는 의미까지 상당 부분 상수</strong>가 되어버리는 것입니다.</p>
+  <p>Idefics2가 그 지점을 정직하게 기록했습니다. 학습된 풀링(perceiver)으로 이미지 한 장의 시각 토큰을 <strong>729개에서 64개로</strong> 줄였는데 평균 성능이 오히려 8.5점 올랐고, 저자들은 <em>"64개를 넘겨도 이득이 없었다"</em>고 적었습니다. 그런데 같은 논문의 다른 표를 보면 이야기가 갈립니다 — 이미지 분할을 켜서 토큰을 64에서 320으로 늘렸을 때 <strong>DocVQA는 67.3 → 74.0</strong>으로 뛰었지만 MMMU는 43.5 → 43.0, MathVista는 51.6 → 51.4로 오히려 미세하게 내려갔습니다. <strong>"토큰을 더 쓰면 좋은가"에 대한 답이 태스크마다 반대</strong>였던 것입니다. 이 장의 나머지가 전부 이 관찰의 연장입니다.</p>
+  <p>그래서 문서·OCR 계열은 리샘플러에서 멀어지고 pixel-shuffle로 몰렸습니다. Idefics3는 364×364 타일을 <strong>169 토큰</strong>으로(2×2 접기), SmolVLM은 더 세게 3×3으로 접어 384×384를 <strong>81 토큰</strong>으로 줄입니다. SmolVLM 논문이 남긴 말이 인상적입니다 — <em>"작은 VLM일수록 더 공격적인 시각 토큰 압축에서 이득을 본다."</em> 모델이 작을수록 긴 시퀀스를 감당할 여력이 없기 때문입니다.</p>
+
+  <h3>4-1. 정보 밀도 — 토큰 하나가 담을 수 있는 양</h3>
+  <p>pixel-shuffle이 "파라미터 0으로 토큰을 ¼"이라고 하면 공짜처럼 들리지만, 정확히는 <strong>토큰 축의 정보를 채널 축으로 옮긴 것</strong>입니다. 2×2를 접으면 채널이 4배가 됩니다. 그런데 프로젝터를 지나 LLM에 들어갈 때 차원은 <span class="tok l">d<sub>ℓ</sub></span>로 고정되어 있습니다. 접은 채널은 결국 그 폭 안으로 다시 눌립니다 — <strong>진짜 손실은 접을 때가 아니라 프로젝터에서</strong> 납니다.</p>
+  <p>그래도 pixel-shuffle이 이기는 이유는 <em>비교 대상이 무엇이냐</em>에 있습니다. 토큰을 ¼로 줄이는 다른 방법은 애초에 해상도를 반으로 낮추는 것인데, 그러면 픽셀 자체가 사라집니다. pixel-shuffle은 픽셀은 다 읽고 나서 접습니다. 같은 토큰 예산에서 <strong>더 많은 원본 픽셀을 통과시킨다</strong>는 것 — 그것이 전부이고, 그거면 충분합니다.</p>
+
+  <h2>5. 원본 모양 그대로 — 네이티브 해상도</h2>
+  <p>타일링은 결국 "고정 크기 인코더"라는 제약을 우회하는 기술입니다. 그렇다면 그 제약을 없애면 어떨까요.</p>
+  <p><strong>Qwen2-VL</strong>은 <em>naive dynamic resolution</em>이라는 이름으로 이 길을 갔습니다. 이미지를 원본 종횡비 그대로 패치로 자르고, 나온 패치 수만큼의 토큰을 그대로 씁니다. 격자 크기에 묶인 절대 위치 임베딩을 <strong>지우고 2D-RoPE로 갈아끼웠기</strong> 때문에 격자가 몇 × 몇이든 상관이 없습니다. 인접한 2×2 토큰은 MLP로 하나로 합칩니다 — 패치가 14px이니 <strong>시각 토큰 하나가 28×28 픽셀</strong>에 대응하는 셈입니다.</p>
+  <p>논문이 든 예가 이 구조를 한 줄로 설명합니다. 224×224 이미지는 패치 16×16 = 256개 → 2×2 병합으로 64개 → 여기에 <code>vision_start</code>·<code>vision_end</code> 특수 토큰 둘이 붙어 <strong>66 토큰</strong>. 크기가 다른 이미지는 그냥 다른 수가 나옵니다.</p>
+  <p>계보를 따지면 이 발상의 뿌리는 <strong>NaViT</strong>의 <em>patch n' pack</em>입니다. 길이가 제각각인 이미지 시퀀스들을 한 배치에 욱여넣어(pack) 학습하는 방법으로, "모든 이미지를 같은 정사각형으로" 라는 전제를 처음 걷어낸 쪽입니다.</p>
+  <p>장점은 분명합니다. 종횡비가 보존되고, 타일 경계가 없고, 작은 이미지에는 적은 토큰만 씁니다. 그런데 <strong>실무에서 이 구조가 위험해지는 지점</strong>도 정확히 거기에 있습니다.</p>
+  <div class="note">
+    <b>네이티브 해상도 모델을 서빙에 올릴 때 가장 먼저 볼 설정은 이미지당 토큰 상한입니다.</b> 상한을 걸지 않으면 사용자가 올린 4K 스크린샷 <em>한 장</em>이 컨텍스트를 통째로 먹고, 그 요청 하나가 배치 전체의 지연을 끌어내립니다. Qwen2-VL은 이 상한을 <code>min_pixels</code>·<code>max_pixels</code>로 노출하는데, 단위가 바로 앞에서 본 <b>28×28 = 토큰 하나</b>입니다. 공식 모델 카드의 기본 범위는 이미지당 <b>4~16,384 토큰</b>이고, 카드 자체가 <em>"필요에 따라 256~1,280 같은 범위로 좁혀 쓰라"</em>고 권합니다. 기본값을 그대로 배포하지 말고, 내 이미지 분포에 맞춰 반드시 다시 잡으십시오.
+  </div>
+  <p>정리하면 지난 몇 년의 흐름은 <strong>고정 224 → 타일 격자 → 가변 길이</strong>였고, 세 단계 모두 답한 질문은 같습니다. "이 이미지에 토큰을 몇 개 쓸 것인가."</p>
+
+  <h2>6. 무릎 — 어디서 멈출 것인가</h2>
+  <p>해상도를 올리면 성능은 오릅니다. 다만 <strong>영원히 오르지는 않습니다.</strong> 곡선은 대체로 이렇게 생겼습니다 — 어느 지점까지는 가파르게 오르다가, 어느 지점을 지나면 눕습니다. 그 꺾이는 자리를 이 장에서는 <strong>무릎(knee)</strong>이라고 부르겠습니다.</p>
+  <p>왜 눕는지는 직관적입니다. 성능을 결정하는 것은 화면의 총 픽셀이 아니라 <strong>가장 작은 결정적 단서가 몇 픽셀을 차지하느냐</strong>입니다. 그 단서가 판독 가능한 크기를 넘어서는 순간 정확도가 크게 뛰고, 그 위로는 <em>이미 읽히는 것을 더 선명하게</em> 만들 뿐입니다.</p>
+  <p>그래서 <strong>무릎은 태스크마다 다른 자리에 있습니다.</strong></p>
+  <ul>
+    <li><strong>문서·OCR</strong> — 결정적 단서는 본문 글자입니다. 한 자가 8~10픽셀은 되어야 읽힙니다. 원본에서 글자가 차지하는 비율이 작으므로, 필요한 전체 해상도가 큽니다. 무릎이 <em>한참 오른쪽</em>에 있습니다.</li>
+    <li><strong>일반 VQA·장면 판단</strong> — "실내인가 실외인가", "고양이가 있는가"의 단서는 화면의 10~30%를 차지합니다. 224에서도 이미 보이고, 무릎이 <em>일찍</em> 옵니다.</li>
+    <li><strong>작은 물체</strong> — 그 사이입니다. 물체는 글자보다 크지만 장면보다 훨씬 작습니다.</li>
+  </ul>
+  <p>비용 쪽은 반대입니다. 비용 곡선은 포화하지 않습니다 — 토큰이 늘수록 선형항이 붙고 그 위로 제곱항이 붙어, 오히려 <strong>가팔라집니다</strong>. 정확도는 눕고 비용은 서니, 최적점은 항상 두 곡선이 어긋나기 시작하는 근처에 있습니다.</p>
+
+  <h3>6-1. 공개 실측은 뭐라고 하나요</h3>
+  <p>지금까지는 그림이었습니다. 공개된 숫자로 확인해 봅시다. Qwen2-VL 논문은 <strong>시각 토큰 수를 고정해 놓고</strong> 같은 7B 모델을 여러 벤치마크에 돌렸습니다.</p>
+
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>시각 토큰</th><th>InfoVQA</th><th>RealWorldQA</th><th>OCRBench</th><th>MMMU</th></tr></thead>
+    <tbody>
+      <tr><td class="num">64</td><td class="num">28.85</td><td class="num">56.47</td><td class="num">572</td><td class="num">53.33</td></tr>
+      <tr><td class="num">576</td><td class="num">65.72</td><td class="num">65.88</td><td class="num"><b>828</b></td><td class="num">52.78</td></tr>
+      <tr><td class="num">1,600</td><td class="num">74.99</td><td class="num">69.54</td><td class="num">824</td><td class="num">52.89</td></tr>
+      <tr><td class="num">3,136</td><td class="num"><b>77.27</b></td><td class="num"><b>70.59</b></td><td class="num">786</td><td class="num"><b>53.44</b></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="color:var(--tx3);font-size:13px">Qwen2-VL-7B, arXiv 2409.12191 Table 7. 벤치마크 점수는 논문 그대로입니다.</p>
+
+  <p>세 줄로 읽힙니다.</p>
+  <ul>
+    <li><strong>InfoVQA는 교과서적인 포화 곡선입니다.</strong> 64 → 576에서 <em>+36.9점</em>, 576 → 1,600에서 <em>+9.3점</em>, 1,600 → 3,136에서 <em>+2.3점</em>. 토큰을 배로 밀 때마다 이득이 4분의 1씩 줄어듭니다. 무릎이 눈에 보입니다.</li>
+    <li><strong>OCRBench는 576에서 정점을 찍고 내려옵니다.</strong> 828 → 824 → 786. 무릎을 지나면 평평해지는 정도가 아니라 <em>손해를 볼 수도</em> 있습니다.</li>
+    <li><strong>MMMU는 49배 구간 내내 평평합니다.</strong> 53.33 → 52.78 → 52.89 → 53.44, 폭이 0.7점입니다. 논문의 해석은 간단합니다 — 여기서 막고 있는 것은 시력이 아니라 <em>추론 능력</em>입니다. <strong>해상도로 풀 수 없는 문제에 해상도를 쓰고 있었던 것</strong>입니다.</li>
+  </ul>
+
+  <p>같은 이야기가 다른 논문에서도 반복됩니다.</p>
+  <ul>
+    <li><strong>MM1</strong>은 대규모 어블레이션 끝에 <em>"이미지 해상도가 가장 큰 요인"</em>이라고 결론지었습니다. 224 → 336만 해도 모든 지표가 약 3% 오르는데, ViT-L → ViT-H로 파라미터를 두 배 늘리는 것은 보통 1% 미만입니다. 그런데 같은 논문이 336 → 1344에서 상대 15% 향상을 보고한 뒤, <strong>1792에서는 평균 성능이 오히려 조금 떨어졌다</strong>고 적습니다. 평가 이미지 상당수가 그보다 작아서 리사이즈 아티팩트가 생겼다는 설명입니다.</li>
+    <li><strong>Idefics2</strong>는 384 → 768로 해상도만 올려 DocVQA를 <strong>22.6 → 42.9</strong>로 끌어올렸습니다. 그런데 거기서 서브이미지 해상도를 최대로 더 밀었더니 TextVQA는 73.0 → 73.6, DocVQA는 <strong>72.9 → 72.7로 오히려 내려갔습니다</strong>.</li>
+    <li><strong>Cambrian-1</strong>은 <em>"고해상도 인코더는 차트·비전 중심 벤치마크를 크게 끌어올리지만 일반 VQA와 지식 VQA에는 중립적"</em>이라고 정리했습니다. 그리고 <strong>576 토큰</strong>만 쓰고도 OCR·차트에서 <strong>2,880 토큰</strong>을 쓰는 모델들을 앞섰습니다.</li>
+  </ul>
+  <p>여기서 이 장의 실무적 결론이 나옵니다. <strong>"해상도를 올렸더니 좋아졌다"는 문장은 태스크 이름 없이는 아무 뜻도 없습니다.</strong> 아래 시뮬레이터로 그 감각을 손에 붙여 봅시다.</p>
+
+  <div class="lab">
+    <div class="lab-tag">LAB 3-1 · 예산을 어디에 쓸 것인가</div>
+    <h3>토큰 예산 시뮬레이터</h3>
+    <p class="hint">타일 해상도 · 타일 수 · 압축을 정하면 <b>시각 토큰 수</b>와 <b>상대 비용</b>이 정해집니다. 청록 곡선은 개념 정확도, 호박 점선은 비용(로그 축), 초록 점선이 <b>무릎</b>입니다. 태스크를 바꾸면 무릎이 어떻게 이사하는지 보세요.</p>
+    <div class="row">
+      <div>
+        <canvas id="b_curve" width="400" height="252" aria-label="시각 토큰 수 대비 개념 정확도와 상대 비용 곡선"></canvas>
+        <div class="legend">
+          <span><i class="v"></i>개념 정확도(임의 단위)</span>
+          <span><i class="l"></i>상대 비용(로그)</span>
+        </div>
+      </div>
+      <div class="ctl">
+        <div>
+          <label>태스크</label>
+          <div class="seg" id="b_task">
+            <button type="button" data-task="doc">문서 · OCR</button>
+            <button type="button" data-task="vqa" class="sel">일반 VQA</button>
+            <button type="button" data-task="small">작은 물체</button>
+          </div>
+        </div>
+        <div><label for="b_side">타일 한 변 <b id="b_sidev">448px (32×32 패치)</b></label>
+          <input type="range" id="b_side" min="0" max="4" step="1" value="2"></div>
+        <div><label for="b_tile">타일 수 <b id="b_tilev">4개 · 2×2</b></label>
+          <input type="range" id="b_tile" min="0" max="5" step="1" value="2"></div>
+        <div>
+          <label>토큰 압축</label>
+          <div class="seg" id="b_comp">
+            <button type="button" data-c="0">없음 · 1:1</button>
+            <button type="button" data-c="1" class="sel">pixel-shuffle · ¼</button>
+          </div>
+        </div>
+        <div class="stat">
+          시각 토큰 <b id="b_ntok">1,280</b><br>
+          유효 해상도 <span id="b_reff">448px</span><br>
+          상대 비용 <span id="b_cost">7.8×</span><br>
+          개념 정확도 <span id="b_acc">74.2</span><br>
+          이 태스크의 무릎 <span class="good" id="b_knee">1,149 tok · 6.6×</span>
+        </div>
+        <canvas id="b_tiles" width="208" height="150" aria-label="타일 분할 배치 도해"></canvas>
+      </div>
+    </div>
+    <p class="hint" style="margin:14px 0 0" id="b_verdict"></p>
+    <p class="hint" style="margin:10px 0 0;color:var(--tx3)">
+      <b>토큰 회계는 진짜입니다.</b> 336px 타일 · 4개(2×2) · 압축 없음으로 두면 <b>2,880</b> — LLaVA-NeXT AnyRes의 최대 설정과 같은 수입니다. 448px · 12개 · pixel-shuffle ¼는 <b>3,328</b>로, InternVL 1.5의 12타일 + 축소본 설정과 같습니다.
+      <b>정확도 곡선은 개념 시뮬레이션입니다</b> — 임의 단위이고 어떤 벤치마크 점수도 재현하지 않습니다. 비용은 <code>L + L²/1000</code>(L = 토큰 수)로 선형항과 제곱항을 섞은 모형이고, 1×는 224px 단일 타일(256토큰)입니다. 무릎은 (log 비용, 정확도) 평면에서 양 끝점을 잇는 직선에서 가장 먼 점 — Kneedle 판정법과 같은 정의입니다. 유효 해상도는 썸네일을 빼고 타일만 세므로, 현재 지점이 곡선보다 살짝 아래에 찍힐 수 있습니다. <b>썸네일은 세부 시력이 아니라 맥락을 사는 비용</b>이기 때문입니다.
+    </p>
+  </div>
+
+  <p>슬라이더를 몇 번 밀어 보면 세 가지가 남습니다. <strong>①</strong> 태스크를 문서로 바꾸면 무릎이 한 자릿수 이상 오른쪽으로 이사하고, 그 자리의 비용은 수백 배가 됩니다. <strong>②</strong> 압축을 켜면 같은 유효 해상도를 훨씬 싸게 살 수 있습니다 — 정확히 이것이 pixel-shuffle을 쓰는 이유입니다. <strong>③</strong> 무릎 오른쪽에서는 슬라이더를 아무리 밀어도 정확도 눈금이 거의 움직이지 않는데 비용 숫자만 자릿수가 늘어납니다. 실무에서 돈이 새는 자리가 대개 여깁니다.</p>
+
+  <h2>7. 실무 — 해상도를 고르는 법</h2>
+
+  <h3>7-1. 먼저 단서의 픽셀 크기를 재십시오</h3>
+  <p>해상도를 정하는 일은 "얼마나 크게 볼까"가 아니라 <strong>"내가 찾는 것이 몇 픽셀이어야 보이는가"</strong>를 정하는 일입니다. 순서는 이렇습니다.</p>
+  <ol>
+    <li>내 데이터에서 <em>가장 작은 결정적 단서</em>를 하나 고릅니다(글자 한 자, 표시등 하나, 멀리 있는 사람 하나).</li>
+    <li>원본에서 그것이 차지하는 픽셀 크기와 <strong>이미지 대비 비율</strong>을 잽니다.</li>
+    <li>그 단서가 최소 가독 크기(글자면 대략 8~10px, 물체면 20~30px)를 넘으려면 전체 해상도가 얼마여야 하는지를 역산합니다.</li>
+    <li>그 값이 <strong>스윕의 하한</strong>입니다. 그 아래는 아무리 모델을 바꿔도 열리지 않습니다.</li>
+  </ol>
+  <p>이 계산을 하지 않고 384와 768만 비교해 "768이 낫네"로 끝내는 경우가 많은데, 필요한 값이 1,500이었다면 둘 다 틀린 답을 골랐을 뿐입니다.</p>
+
+  <h3>7-2. 태스크별 감</h3>
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>태스크</th><th>결정적 단서</th><th>해상도</th><th>구조 선택</th></tr></thead>
+    <tbody>
+      <tr><td>장면 분류 · 존재 판정</td><td>화면의 10~30%</td><td class="num">낮게 (224~448)</td><td>단일 타일이면 충분</td></tr>
+      <tr><td>일반 VQA · 캡션</td><td>주요 물체</td><td class="num">중간 (336~672)</td><td>타일 2×2 + 축소본</td></tr>
+      <tr><td>작은 물체 · 원거리</td><td>수십 픽셀</td><td class="num">높게 (896~1,500)</td><td>타일 + 압축</td></tr>
+      <tr><td>문서 · 차트 · OCR</td><td>글자 한 자</td><td class="num">아주 높게 (1,500+)</td><td>타일 다수 + 압축 필수</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>표의 오른쪽 두 칸이 붙어 다닌다는 점에 주목하십시오. <strong>해상도를 올리기로 했다면 압축도 같이 결정해야 합니다.</strong> 둘은 하나의 노브입니다.</p>
+
+  <h3>7-3. 스윕을 어떻게 설계할까요</h3>
+  <ul>
+    <li><strong>로그 간격으로 3~4점.</strong> 384 → 768 → 1,536처럼 배로 띄웁니다. 등간격(400·500·600)은 무릎을 못 찾습니다 — 무릎은 배율 축에서 보이지 선형 축에서 보이지 않습니다.</li>
+    <li><strong>정확도만 기록하지 마십시오.</strong> 점마다 <em>(정확도, 시각 토큰 수, p95 지연)</em> 세 값을 같이 남깁니다. 무릎은 정확도 곡선 하나로는 정의되지 않습니다.</li>
+    <li><strong>태스크를 섞지 마십시오.</strong> 문서와 장면 판단을 한 평균 점수로 뭉개면 무릎이 두 개 겹쳐 아무 데도 없는 곡선이 나옵니다. 하위 태스크별로 따로 그리십시오.</li>
+    <li><strong>압축비를 고정한 채 해상도만 스윕하지 마십시오.</strong> 흔한 실수입니다. 예산이 같아도 <em>적은 타일 × 무압축</em>과 <em>많은 타일 × 압축</em>은 서로 다른 점이고, 문서 계열에서는 대개 후자가 이깁니다.</li>
+    <li><strong>축소본을 빼먹지 마십시오.</strong> 타일만 넣고 성능이 안 나온다며 해상도를 더 올리는 경우가 있는데, 빠진 것이 맥락일 때가 많습니다.</li>
+  </ul>
+
+  <div class="note">
+    <b>검출 엔지니어를 위한 대응표.</b> <code>imgsz</code> = 이미지당 토큰 상한, <code>letterbox</code> = AnyRes 격자 후보(종횡비를 어떻게 맞출 것인가), <code>FPN의 다층 구조</code> = 축소본 + 타일(맥락과 세부의 분업), <code>배치 크기</code> = 컨텍스트 길이. 스윕을 돌리는 습관은 그대로 쓰되, <b>기록할 축이 하나 늘었다</b>고 생각하면 됩니다 — 토큰 수.
+  </div>
+
+  <div class="lab">
+    <div class="lab-tag">LAB 3-2 · 선택 실행 · 실제 모델</div>
+    <h3>브라우저 안에서 해상도 바꿔 추론하기</h3>
+    <p class="hint">여기까지는 전부 계산이었습니다. 이제 <b>진짜 VLM</b>을 이 페이지 안에서 돌려 같은 이미지·같은 질문을 해상도만 바꿔 물어봅니다. 모델은 <a href="https://huggingface.co/HuggingFaceTB/SmolVLM-256M-Instruct">SmolVLM-256M-Instruct</a>(양자화), 실행은 WebGPU입니다. <b>서버로 아무것도 보내지 않습니다</b> — 가중치를 받아 브라우저에서 직접 돌립니다.</p>
+
+    <div class="runrow" style="margin-bottom:12px">
+      <span class="pill" id="w_gpu">WebGPU 확인 중…</span>
+      <span class="pill" id="w_cache">캐시 확인 중…</span>
+    </div>
+
+    <div id="w_gate">
+      <p class="hint" style="margin:0 0 10px">
+        가중치는 약 <b>160MB</b>입니다(WebGPU가 f16을 지원하지 않으면 약 260MB). Wi-Fi를 권합니다.
+        한 번 받으면 브라우저 캐시에 남아 다음 방문에는 즉시 뜹니다.
+        <b>모바일 주의</b> — iOS Safari는 탭당 메모리 여유가 크지 않아 로딩 도중 탭이 재시작될 수 있습니다. 데스크톱 Chrome/Edge를 권합니다.
+      </p>
+      <div class="btns">
+        <button class="btn primary" id="w_start" type="button">모델 받기 (약 160MB)</button>
+        <button class="btn" id="w_skip" type="button">건너뛰기</button>
+      </div>
+    </div>
+
+    <div id="w_loading" hidden>
+      <div class="bar"><i id="w_barfill"></i></div>
+      <div class="mini" id="w_status">준비 중…</div>
+    </div>
+
+    <div id="w_app" hidden>
+      <div class="row" style="margin-top:4px">
+        <div>
+          <canvas id="w_canvas" width="1536" height="1152" style="width:300px;height:auto" aria-label="추론에 쓰는 샘플 이미지"></canvas>
+          <div class="btns" style="margin-top:10px">
+            <button class="btn" id="w_sample" type="button">↺ 샘플 이미지</button>
+            <label class="btn" for="w_file" style="display:inline-block">이미지 올리기</label>
+            <input type="file" id="w_file" accept="image/*" style="position:absolute;left:-9999px">
+          </div>
+        </div>
+        <div class="ctl">
+          <div>
+            <label for="w_prompt">질문 (256M 모델이라 영어가 안정적입니다)</label>
+            <input type="text" id="w_prompt" class="field" value="What is the total amount on this receipt?">
+          </div>
+          <p class="hint" style="margin:0">
+            같은 이미지·같은 질문을 <b>긴 변 512 · 1,024 · 1,536px</b> 세 가지로 돌립니다.
+            SmolVLM은 512px 타일로 자르므로, 세 프리셋은 각각 타일 <b>1 · 5 · 10</b>장
+            (= 시각 토큰 <b>64 · 320 · 640</b>)이 됩니다. 실제 값은 아래 표에 측정치가 찍힙니다.
+          </p>
+          <div class="btns">
+            <button class="btn primary" id="w_run" type="button">해상도 3단 비교 실행</button>
+            <button class="btn" id="w_stop" type="button" hidden>중단</button>
+          </div>
+          <div class="mini" id="w_run_status"></div>
+          <div class="ansbox" id="w_live">여기에 생성 중인 답이 흐릅니다.</div>
+        </div>
+      </div>
+      <div class="tablebox" style="margin-top:18px">
+        <table>
+          <thead><tr><th>입력 해상도</th><th>입력 토큰</th><th>소요</th><th>응답</th></tr></thead>
+          <tbody id="w_rows"><tr><td colspan="4" style="color:var(--tx3)">아직 실행 전입니다.</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="w_fallback" hidden>
+      <p class="hint" style="margin:12px 0 0" id="w_fbmsg"></p>
+    </div>
+
+    <p class="hint" style="margin:16px 0 0">
+      <b>무엇을 볼까요.</b> 답이 맞았는지가 아니라 <b>세 줄의 차이</b>를 보십시오 — 해상도를 올리면 입력 토큰이 몇 배가 되는지, 소요 시간이 그 이상으로 뛰는지, 그리고 낮은 해상도에서 못 읽던 작은 글자가 어느 지점부터 읽히기 시작하는지. 이 장에서 계산으로만 본 곡선을 세 점으로 실제로 찍어보는 것입니다.
+    </p>
+    <p class="hint" style="margin:8px 0 0;color:var(--tx3)">
+      256M은 아주 작은 모델입니다 — 세 해상도 모두 틀릴 수도 있고, 답이 바뀌지 않을 수도 있습니다. <b>믿을 만한 관찰은 토큰 수와 지연이고</b>, 정답률은 참고입니다. 가중치는 Hugging Face CDN에서 직접 내려받으며, 이미지와 질문은 브라우저 밖으로 나가지 않습니다.
+      런타임은 <code>@huggingface/transformers</code> <b>3.7.1</b> 고정(공식 SmolVLM WebGPU 예제가 고정한 버전), CDN은 jsDelivr입니다. 해상도 프리셋은 이미지를 미리 줄이는 것이 아니라 <b>이미지 프로세서의 리사이즈 목표</b>를 바꿉니다 — 이 모델의 기본 <code>longest_edge</code>가 2048이라, 그냥 작은 이미지를 넣으면 도로 2048로 늘려 타일을 내기 때문입니다. <b>토큰을 줄이는 것은 리사이즈가 아니라 설정입니다.</b>
+    </p>
+  </div>
+
+  <h2>8. 확인 문제</h2>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 3-1</div>
+    <p class="q">336px 단일 입력(576 토큰)을 쓰던 모델을, 336px 타일 2×2 + 전역 축소본 한 장의 AnyRes 구성으로 바꿨습니다. 압축은 없습니다. LLM이 받는 시각 토큰은 몇 개가 될까요?</p>
+    <div class="opts" id="q1">
+      <button type="button" data-a="0">1,152개 — 타일이 2배 크기가 되었으므로 2배입니다</button>
+      <button type="button" data-a="1">2,880개 — 타일 4장에 축소본 1장을 더해 576 × 5입니다</button>
+      <button type="button" data-a="0">2,304개 — 타일 4장이므로 576 × 4이고, 축소본은 토큰을 쓰지 않습니다</button>
+    </div>
+    <div class="expl" id="e1">타일 하나가 336px = 24×24 격자 = <b>576 토큰</b>이고, 2×2 격자면 타일이 4장, 여기에 전역 축소본 1장이 더 붙어 총 5장 — <b>2,880 토큰</b>입니다. 축소본도 똑같이 인코더를 통과하므로 당연히 토큰을 씁니다. 그리고 어텐션 비용은 토큰 수의 제곱이므로, 5배가 아니라 <b>25배 쪽</b>으로 갑니다.</div>
+  </div>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 3-2</div>
+    <p class="q">같은 모델에서 문서·OCR 태스크의 "무릎"이 일반 VQA보다 훨씬 오른쪽(높은 해상도)에 있는 이유로 가장 적절한 것은 무엇일까요?</p>
+    <div class="opts" id="q2">
+      <button type="button" data-a="0">문서 이미지가 일반 사진보다 파일 크기가 크기 때문입니다</button>
+      <button type="button" data-a="1">결정적 단서인 글자 한 자가 원본에서 차지하는 비율이 아주 작아, 판독 가능한 픽셀 수에 도달하려면 전체 해상도가 훨씬 커야 하기 때문입니다</button>
+      <button type="button" data-a="0">OCR 모델은 어텐션이 제곱이 아니라 선형이라 토큰을 더 써도 비용이 늘지 않기 때문입니다</button>
+    </div>
+    <div class="expl" id="e2">무릎의 위치를 정하는 것은 <b>가장 작은 결정적 단서의 픽셀 크기</b>입니다. 글자 한 자는 8~10픽셀은 되어야 읽히는데 원본에서 차지하는 비율이 워낙 작으니, 그 조건을 채우려면 전체 해상도를 크게 올려야 합니다. 반면 "실내인가 실외인가"의 단서는 화면의 상당 부분을 차지해 224에서도 이미 보입니다. 비용은 태스크와 무관하게 똑같이 제곱으로 늘어납니다 — 그래서 문서 계열에서 압축이 선택이 아니라 필수가 됩니다.</div>
+  </div>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 3-3</div>
+    <p class="q">Qwen2-VL처럼 원본 해상도를 그대로 받는 모델을 실제 서비스에 올리려 합니다. 배포 전 가장 먼저 확인해야 할 것은 무엇일까요?</p>
+    <div class="opts" id="q3">
+      <button type="button" data-a="0">타일 격자 후보 목록 — 종횡비별로 몇 × 몇 격자를 쓸지 정해야 합니다</button>
+      <button type="button" data-a="1">이미지당 토큰(픽셀) 상한 — 상한이 없으면 큰 이미지 한 장이 컨텍스트와 지연을 통째로 먹습니다</button>
+      <button type="button" data-a="0">위치 임베딩 테이블의 크기 — 격자가 커지면 테이블을 보간해 늘려야 합니다</button>
+    </div>
+    <div class="expl" id="e3">네이티브 해상도의 장점(이미지마다 토큰이 다름)이 그대로 운영 리스크가 됩니다. <b>상한을 걸지 않으면 4K 스크린샷 한 장이 배치 전체의 p95 지연을 끌어내립니다.</b> 격자 후보는 타일링 계열의 개념이라 여기서는 쓰지 않고, 2D RoPE를 쓰는 구조라 보간할 위치 임베딩 테이블 자체가 없습니다.</div>
+  </div>
+
+  <div class="refs">
+    <h2>더 읽을거리</h2>
+    <ol>
+      <li>Liu et al., <a href="https://arxiv.org/abs/2310.03744">Improved Baselines with Visual Instruction Tuning (LLaVA-1.5)</a>, 2023 — CLIP ViT-L/14-336px 고정 입력. 논문은 해상도만 적고 토큰 수는 적지 않습니다. 576 = (336/14)²이 표로 인쇄된 곳은 <a href="https://arxiv.org/abs/2406.16860">Cambrian-1</a> Table 10과 <a href="https://llava-vl.github.io/blog/2024-05-25-llava-next-ablations/">LLaVA-NeXT 어블레이션 블로그</a>입니다.</li>
+      <li>Liu et al., <a href="https://llava-vl.github.io/blog/2024-01-30-llava-next/">LLaVA-NeXT</a>, 2024 — AnyRes 격자 후보와 "픽셀 4배". 토큰 회계식 <code>L=(a×b+1)×T</code>는 <a href="https://arxiv.org/abs/2408.03326">LLaVA-OneVision</a>에, 최대 2,880이라는 수는 MM1·Cambrian-1·Idefics2에 인쇄되어 있습니다.</li>
+      <li>Chen et al., <a href="https://arxiv.org/abs/2404.16821">How Far Are We to GPT-4V? (InternVL 1.5)</a>, 2024 — 448px 타일 동적 분할(학습 1~12, 테스트 40), 축소본, pixel-shuffle로 타일당 256 토큰, 시각 토큰 256~3,328.</li>
+      <li>Wang et al., <a href="https://arxiv.org/abs/2409.12191">Qwen2-VL</a>, 2024 — naive dynamic resolution, 2D-RoPE, 2×2 병합, 그리고 이 장 6-1의 토큰 예산 표(Table 7). 그 앞의 계보로 Dehghani et al., <a href="https://arxiv.org/abs/2307.06304">NaViT: Patch n' Pack</a>, NeurIPS 2023.</li>
+      <li>압축의 계보 — Jaegle et al., <a href="https://arxiv.org/abs/2103.03206">Perceiver</a>, ICML 2021 · Alayrac et al., <a href="https://arxiv.org/abs/2204.14198">Flamingo</a>, NeurIPS 2022(64개 고정) · Laurençon et al., <a href="https://arxiv.org/abs/2405.02246">Idefics2</a>, NeurIPS 2024(729→64 학습된 풀링, "64를 넘겨도 이득 없음") · <a href="https://arxiv.org/abs/2408.12637">Idefics3</a>, 2024(리샘플러를 버리고 pixel-shuffle로, 364² → 169 토큰).</li>
+      <li>Marafioti et al., <a href="https://arxiv.org/abs/2504.05299">SmolVLM</a>, 2025 · <a href="https://huggingface.co/blog/smolvlm">공식 블로그</a> — LAB 3-2가 실제로 돌리는 모델. 384²를 81 토큰으로 접는 3×3 pixel-shuffle과 "작은 VLM일수록 공격적 압축이 유리하다".</li>
+      <li>해상도 어블레이션 — McKinzie et al., <a href="https://arxiv.org/abs/2403.09611">MM1</a>, ECCV 2024(해상도가 가장 큰 요인, 336→1344 상대 15%, 그리고 1792에서의 반전) · Tong et al., <a href="https://arxiv.org/abs/2406.16860">Cambrian-1</a>, NeurIPS 2024(고해상도는 차트·비전 중심에만 듣는다는 Finding 5).</li>
+      <li>Satopää et al., <a href="https://doi.org/10.1109/ICDCSW.2011.20">Finding a "Kneedle" in a Haystack</a>, ICDCS Workshops 2011, pp. 166–171 — LAB 3-1이 쓰는 무릎 판정법(<a href="https://raghavan.usc.edu/papers/kneedle-simplex11.pdf">PDF</a>).</li>
+    </ol>
+  </div>
+
+  <div class="next">
+    이전 장 — <a href="02.html">02 두 세계를 잇는 프로젝터</a><br>
+    다음 장 — <a href="04.html"><b>04 그라운딩 — 좌표를 말하게 하기</b></a>: 토큰 예산을 정했다면, 이제 그 토큰들이 <b>어디에</b> 있는지를 말하게 할 차례입니다. 박스를 텍스트로 뱉는 모델들과 좌표 표기법을 다룹니다.
+  </div>
+
+  <footer>VLM 워크북 · 개인 학습 노트 · 인터랙티브 실습은 전부 브라우저 안에서 돕니다.</footer>
+</main>
+</div>
+
+<script defer src="../assets/js/site.js"></script>
+<script defer src="../assets/js/labs/ch03-budget.js"></script>
+<script defer src="../assets/js/labs/ch03-webgpu.js"></script>
+</body>
+</html>

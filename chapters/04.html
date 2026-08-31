@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>04 그라운딩 — 좌표를 말하게 하기 — VLM 워크북</title>
+<meta name="description" content="검출기가 회귀하던 좌표를 VLM은 텍스트로 생성합니다. 좌표 토큰화 3종, 그라운딩 데이터, 생성형 검출의 실패 모드, 제약 디코딩과 파서 복구, 그리고 텍스트 출력을 IoU로 채점하는 규칙까지.">
+<script>try{var t=localStorage.getItem('vlmwb_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="../assets/css/base.css">
+<style>
+/* 4장 전용 — 텍스트 입출력 카드와 파싱 결과 목록 */
+textarea.io,input.io{width:100%;background:var(--panel2);color:var(--tx);
+  border:1px solid var(--line);border-radius:8px;padding:9px 11px;
+  font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.7}
+textarea.io{resize:vertical;min-height:122px;white-space:pre;overflow-x:auto}
+.io:focus-visible{outline:2px solid var(--vis);outline-offset:1px}
+.ck{display:flex!important;align-items:center;font-size:12.5px;color:var(--tx2);margin:0 0 5px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.chips button{background:var(--panel2);border:1px solid var(--line);color:var(--tx2);
+  font:inherit;font-size:11.5px;padding:5px 9px;border-radius:999px;cursor:pointer;line-height:1.4}
+.chips button:hover{color:var(--tx)}
+.chips button.sel{border-color:var(--vis);color:var(--vis)}
+.chips.bad button:hover{border-color:var(--bad);color:var(--tx)}
+.chips.bad button.sel{border-color:var(--bad);color:var(--bad)}
+.parsed{margin-top:16px;display:flex;flex-direction:column;gap:4px;
+  font-family:'IBM Plex Mono',monospace;font-size:12px}
+.parsed div{display:flex;gap:9px;align-items:baseline;flex-wrap:wrap;
+  border-left:2px solid var(--line);padding:3px 0 3px 10px;color:var(--tx3)}
+.parsed .tag{flex:none;font-size:10px;letter-spacing:.06em;padding:1px 7px;
+  border-radius:999px;border:1px solid var(--line);color:var(--tx3)}
+.parsed .tag.tp{color:var(--ok);border-color:var(--ok)}
+.parsed .tag.fp{color:var(--bad);border-color:var(--bad)}
+.parsed .tag.fail{color:var(--lang);border-color:var(--lang)}
+.parsed .src{color:var(--tx2);word-break:break-all}
+.legend i.ok{background:var(--ok)}
+.legend i.bad{background:var(--bad)}
+</style>
+</head>
+<body data-chapter="04">
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+<div class="wrap">
+<nav class="rail" aria-label="목차"></nav>
+
+<main id="main">
+  <div class="eyebrow">CHAPTER 04</div>
+  <h1>그라운딩 — 좌표를 말하게 하기</h1>
+  <p class="lede">1장에서 이미지를 토큰으로 잘랐고, 2장에서 그 토큰을 언어 공간으로 옮겼고, 3장에서 그 토큰을 어디에 쓸지 정했습니다. 이제 모델에게 물어볼 차례입니다 — <b>"그래서, 어디에 있나요?"</b> 검출기는 좌표를 <b>숫자로 계산</b>합니다. VLM은 좌표를 <b>글자로 씁니다</b>. 같은 박스를 얻는 두 방법의 차이가, 이 장에서 다룰 모든 문제의 출발점입니다.</p>
+
+  <h2>1. 회귀에서 생성으로</h2>
+  <p>YOLO의 헤드가 하는 일을 떠올려 봅시다. 격자 셀마다 네 개의 실수를 <strong>회귀</strong>하고, objectness와 클래스 점수를 붙이고, 겹치는 결과를 <strong>NMS</strong>로 정리합니다. 출력은 언제나 고정된 모양의 텐서입니다. DETR이 NMS를 없앴을 때도 바뀐 것은 후처리였을 뿐, 좌표 자체는 여전히 <em>고정 개수의 쿼리가 뱉는 연속값 벡터</em>였습니다.</p>
+  <p>VLM에는 그런 헤드가 없습니다. 있는 것은 어휘 위의 소프트맥스 하나뿐입니다. 그래서 모델은 <code>(</code>, <code>3</code>, <code>1</code>, <code>2</code>, <code>,</code> … 를 <strong>한 토큰씩 순서대로 생성</strong>합니다. 좌표는 계산 결과가 아니라 <strong>문장</strong>입니다.</p>
+  <p>이 전환에서 얻는 것이 하나 있습니다. <strong>클래스 목록이 사라집니다.</strong> 검출기는 학습 시점에 클래스 수를 못 박아야 하지만, 어휘가 곧 클래스인 모델은 "빨간 우산을 들고 있는 사람"도 그냥 씁니다. 학습 때 본 적 없는 이름도, 이름 대신 긴 설명구도 됩니다.</p>
+  <p>대신 네 가지를 새로 떠안습니다. 이 장의 나머지는 사실상 이 넷의 목록입니다.</p>
+  <ul>
+    <li><strong>이산화 오차</strong> — 연속값을 글자로 쓰려면 유한한 눈금 위에 올려야 합니다. 눈금 간격이 곧 정확도의 천장입니다.</li>
+    <li><strong>포맷 실패</strong> — 회귀 헤드는 잘못된 <em>값</em>을 낼 수 있어도 잘못된 <em>모양</em>을 내지는 못합니다. 생성기는 낼 수 있습니다.</li>
+    <li><strong>개수 제한</strong> — 박스 하나가 토큰 십수 개입니다. 객체가 많아지면 생성 길이 예산이 먼저 바닥납니다.</li>
+    <li><strong>순서 의존</strong> — 자기회귀 생성은 앞에 쓴 박스를 보고 다음 박스를 씁니다. 객체 집합에는 원래 순서가 없는데, 시퀀스에는 있어야 합니다.</li>
+  </ul>
+
+  <div class="note">
+    <b>검출 엔지니어를 위한 대응표.</b> <code>회귀 헤드</code> → 어휘 소프트맥스, <code>NMS</code> → 파서의 중복 제거 규칙, <code>confidence</code> → 생성 시퀀스의 로그확률(또는 없음), <code>앵커/그리드</code> → 없음(대신 좌표 표기법 자체가 사전 지식), <code>클래스 목록</code> → 프롬프트 문장.
+  </div>
+
+  <h2>2. 좌표를 토큰으로 만드는 세 가지 방법</h2>
+  <p>"좌표를 글자로 쓴다"는 말은 아직 구현이 아닙니다. 실제 모델들은 서로 다른 세 갈래를 택했습니다.</p>
+
+  <h3>2-1. 정규화 정수 문자열 — 어휘를 건드리지 않기</h3>
+  <p>가장 널리 쓰이는 방식입니다. 이미지 크기와 무관하게 각 축을 <span class="tok v">0~1000</span> 구간의 정수로 정규화한 뒤, 그냥 <em>숫자를 씁니다</em>. Qwen-VL은 박스를 <code>(x1,y1),(x2,y2)</code> 문자열로 적고 <code>&lt;box&gt;…&lt;/box&gt;</code>로 감쌌으며, 그 박스가 가리키는 표현은 <code>&lt;ref&gt;…&lt;/ref&gt;</code>로 묶었습니다.</p>
+  <p>장점이 분명합니다. <strong>토크나이저를 고치지 않아도 됩니다.</strong> 숫자 토큰은 LLM이 이미 수십억 번 본 것들이고, 사전학습에서 얻은 수 감각이 그대로 전이됩니다. 단점도 분명합니다. 좌표 하나가 여러 토큰으로 쪼개지므로 <strong>박스 하나에 십수 토큰</strong>이 들고, 자릿수 단위로 틀립니다 — <code>312</code>의 첫 글자가 <code>7</code>로 나오면 박스가 이미지 폭의 40%를 건너뜁니다. 이산화 오차가 균등하지 않다는 뜻입니다.</p>
+
+  <h3>2-2. 전용 위치 토큰 — 어휘에 좌표를 추가하기</h3>
+  <p>다른 길은 좌표 <em>구간마다 토큰을 하나씩</em> 만들어 어휘에 넣는 것입니다. Pix2Seq가 검출을 아예 "언어 모델링 문제"로 재정의하면서 이 방식을 썼습니다. 좌표를 수백~수천 개 구간으로 양자화해 새 토큰으로 삼고, 객체 하나를 <code>y1 x1 y2 x2 class</code> 다섯 토큰으로 적습니다. 논문은 구간 수가 500 아래로 내려가면 성능이 떨어진다고 보고했습니다.</p>
+  <p>Kosmos-2는 이미지를 32×32 격자로 나눠 <code>&lt;loc_1&gt;</code>~<code>&lt;loc_1024&gt;</code> 토큰 1,024개를 만들고, 박스를 좌상단·우하단 두 토큰으로 표현했습니다. Florence-2는 구간 1,000개짜리 위치 토큰을 두고, 같은 표기법을 박스뿐 아니라 <strong>사각 사변형(OCR)과 폴리곤(세그멘테이션)</strong>까지 확장했습니다.</p>
+  <p>이 방식의 이점은 <strong>길이</strong>입니다. 좌표 하나가 정확히 토큰 하나이므로 박스가 4토큰으로 끝나고, 자릿수가 쪼개질 일도 없습니다. 대가는 <strong>임베딩을 처음부터 배워야 한다</strong>는 것입니다. 모델 입장에서 <code>&lt;loc_511&gt;</code>과 <code>&lt;loc_512&gt;</code>는 처음에 아무 관계도 없는 남남입니다 — "인접한 구간은 비슷한 위치"라는 사실조차 데이터로 가르쳐야 합니다. 그리고 구간 수는 학습 시점에 고정되어, 나중에 해상도를 올려도 눈금은 그대로입니다.</p>
+
+  <h3>2-3. 자연어 수치와 구조화 출력 — 파이프라인에 바로 꽂기</h3>
+  <p>세 번째는 어휘를 늘리지도, 특수 태그를 쓰지도 않고 <strong>그냥 평범한 숫자로</strong> 쓰는 방식입니다. Shikra는 좌표를 <code>[0.000, 1.000]</code> 범위의 소수 세 자리로 적어 문장 안에 자연스럽게 섞었습니다. 최근 모델들은 여기서 한 걸음 더 나가 <strong>JSON</strong>을 직접 뱉습니다 — Qwen2.5-VL은 정규화 대신 입력 이미지의 <em>실제 픽셀 좌표</em>를 쓰고, 박스와 점을 JSON 객체 목록으로 내놓도록 바꾸었습니다.</p>
+  <p>서빙 입장에서는 이쪽이 가장 편합니다. 라벨·박스·속성을 한 객체에 담을 수 있고, 스키마를 그대로 문서화할 수 있으며, 뒤에서 볼 <strong>제약 디코딩</strong>과 궁합이 좋습니다. 대신 토큰이 가장 길고, <strong>포맷이 무너질 표면적도 가장 넓습니다</strong>. 중괄호 하나가 빠지면 파서 전체가 실패합니다.</p>
+
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>표기법</th><th>어휘 변경</th><th>박스당 토큰</th><th>위치 해상도</th><th>대표</th></tr></thead>
+    <tbody>
+      <tr><td>정규화 정수 문자열</td><td>없음</td><td class="num">~12–20</td><td class="num">1/1000</td><td>Qwen-VL</td></tr>
+      <tr><td>전용 위치 토큰</td><td class="num">+수백~수천</td><td class="num">4</td><td class="num">구간 수에 고정</td><td>Pix2Seq · Kosmos-2 · Florence-2</td></tr>
+      <tr><td>자연어 실수 / JSON</td><td>없음</td><td class="num">~20–40</td><td>소수 자릿수만큼</td><td>Shikra · Qwen2.5-VL</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="lab">
+    <div class="lab-tag">LAB 4-1 · 좌표 문자열 ↔ 박스</div>
+    <h3>모델이 뱉은 텍스트를 박스로 되돌리기</h3>
+    <p class="hint">왼쪽은 합성 장면이고, <span class="tok l">호박색 점선</span>이 정답 박스입니다. 오른쪽 텍스트가 "모델 출력"입니다 — <b>직접 고쳐도 됩니다.</b> 포맷 프리셋으로 표기법을 바꾸고, 고장 난 출력을 넣어 보고, 복구 규칙을 하나씩 꺼 보세요. 아래 목록에 어떤 줄이 어떻게 처리됐는지 그대로 나옵니다.</p>
+    <div class="row">
+      <div>
+        <canvas id="g1_cv" aria-label="도형 4개가 있는 합성 장면과 정답·예측 박스"></canvas>
+        <div class="legend">
+          <span><i class="l"></i>정답(점선)</span>
+          <span><i class="ok"></i>TP · IoU ≥ 0.5</span>
+          <span><i class="bad"></i>FP</span>
+        </div>
+      </div>
+      <div class="ctl">
+        <div>
+          <label>출력 포맷</label>
+          <div class="seg" id="g1_preset">
+            <button type="button" data-p="int1000" class="sel">정수 0~1000</button>
+            <button type="button" data-p="pixel">픽셀</button>
+            <button type="button" data-p="json">JSON</button>
+          </div>
+          <div class="chips bad" id="g1_bad">
+            <button type="button" data-p="broken">괄호 누락</button>
+            <button type="button" data-p="swap">좌표 뒤집힘</button>
+            <button type="button" data-p="unitmix">스케일 혼동</button>
+            <button type="button" data-p="trunc">출력 잘림</button>
+            <button type="button" data-p="halluc">환각 · 중복</button>
+          </div>
+        </div>
+        <div>
+          <label for="g1_txt">모델 출력</label>
+          <textarea id="g1_txt" class="io" rows="7" spellcheck="false" aria-label="모델 출력 텍스트"></textarea>
+        </div>
+        <div>
+          <label>파서의 해석 스케일</label>
+          <div class="seg" id="g1_scale">
+            <button type="button" data-s="1000" class="sel">0~1000</button>
+            <button type="button" data-s="px">픽셀</button>
+            <button type="button" data-s="unit">0~1 실수</button>
+          </div>
+        </div>
+        <div>
+          <label>복구 규칙</label>
+          <label class="ck"><input type="checkbox" id="g1_loose" checked>느슨한 숫자 추출(괄호 무시)</label>
+          <label class="ck"><input type="checkbox" id="g1_sort" checked>x1&gt;x2 자동 교환</label>
+          <label class="ck"><input type="checkbox" id="g1_clamp" checked>범위 밖 좌표 클램프</label>
+          <label class="ck"><input type="checkbox" id="g1_dedup" checked>중복 제거(IoU&gt;0.9)</label>
+        </div>
+        <div>
+          <label for="g1_bins">좌표 양자화 <b id="g1_binsv">1,000 bin</b></label>
+          <input type="range" id="g1_bins" min="0" max="4" step="1" value="4">
+        </div>
+        <div class="stat">
+          파싱 <b id="g1_ok">4</b> / 시도 <span id="g1_try">4</span><br>
+          TP <span class="good" id="g1_tp">4</span> ·
+          FP <span class="warn" id="g1_fp">0</span> ·
+          미검출 <span class="warn" id="g1_fn">0</span><br>
+          평균 IoU <span id="g1_iou">0.000</span><br>
+          IoU 상한 <span id="g1_ceil">1.000</span>
+        </div>
+      </div>
+    </div>
+    <div class="parsed" id="g1_rows"></div>
+    <p class="hint" style="margin:14px 0 0" id="g1_note"></p>
+    <p class="hint" style="margin:8px 0 0;color:var(--tx3)">관찰 포인트 — <b>①</b> "괄호 누락"을 켠 뒤 <b>느슨한 숫자 추출</b>을 끄면 몇 줄이 통째로 사라집니다. <b>②</b> "스케일 혼동"은 문법적으로 완벽한 출력인데도 전부 틀립니다(해석 스케일을 <b>0~1 실수</b>로 바꿔 보세요). <b>③</b> 양자화 슬라이더를 내리면 <b>가장 작은 도형부터</b> 무너집니다 — 50 bin에서는 정답 박스를 그대로 양자화하기만 해도 IoU가 0.43이라, 모델이 완벽하게 맞혀도 미검출입니다.</p>
+  </div>
+
+  <p>슬라이더를 내려 보면 이산화가 왜 균등한 손해가 아닌지 바로 보입니다. 정규화 좌표에서 구간 폭을 δ라 하면, 폭 w·높이 h짜리 박스의 IoU는 최악의 경우 <code>(w−δ)(h−δ) / (w+δ)(h+δ)</code>까지 떨어집니다. w가 크면 δ는 무시할 수 있지만, <strong>w가 δ의 몇 배밖에 안 되는 작은 객체에서는 이 값이 급격히 무너집니다.</strong> 눈금 1,000개는 넉넉해 보여도, 이미지의 3%짜리 물체에게는 눈금 30칸이 전부입니다.</p>
+
+  <h2>3. 그라운딩 데이터 — 무엇을 보여주면 좌표를 말하게 되는가</h2>
+  <p>모델이 좌표를 말하려면 좌표가 붙은 문장을 봐야 합니다. 이 데이터는 크게 네 모양으로 나뉩니다.</p>
+  <ul>
+    <li><strong>참조 표현 이해(REC)</strong> — 문장 하나를 주고 박스 하나를 찾게 합니다. "왼쪽에서 두 번째 파란 사각형" → <code>(300,374),(410,565)</code>.</li>
+    <li><strong>참조 표현 생성(REG)</strong> — 반대 방향입니다. 박스를 주고, <em>그 객체만 유일하게 가리키는</em> 문장을 쓰게 합니다.</li>
+    <li><strong>검출 instruction</strong> — "이미지에서 모든 X를 찾아라" → 박스 목록. 개수가 정해져 있지 않다는 점에서 앞의 둘과 성격이 다릅니다.</li>
+    <li><strong>그라운디드 캡셔닝</strong> — 문장을 쓰면서 각 명사구에 박스를 붙입니다. Kosmos-2가 웹 캡션을 자동으로 이 형식으로 바꿔 대규모 코퍼스(GrIT)를 만들었고, Florence-2는 1억 장 규모 이미지에 수십억 개 주석을 붙인 FLD-5B로 같은 일을 했습니다.</li>
+  </ul>
+  <p>REC 벤치마크의 표준은 <strong>RefCOCO 계열</strong>입니다. 이 셋의 차이를 아는 것이 은근히 중요합니다. RefCOCO와 RefCOCO+는 두 사람이 시간 압박 속에서 주고받는 게임으로 수집되어 표현이 아주 짧습니다. 그런데 <strong>RefCOCO+는 위치를 가리키는 단어를 금지</strong>했습니다 — "왼쪽의"가 막히면 "줄무늬 셔츠를 입은"처럼 <em>외형</em>으로만 지목해야 합니다. RefCOCOg는 대화 없이 수집되어 표현이 훨씬 길고 서술적입니다. 같은 이미지, 같은 박스인데 <strong>언어의 성격이 다르고, 그래서 모델의 약점이 다르게 드러납니다.</strong></p>
+  <p>검출 instruction에서는 두 가지가 실무를 가릅니다. 첫째, <strong>출력 스키마를 프롬프트에 못 박아야 합니다</strong> — 예시 한 줄을 프롬프트에 넣는 것만으로 파싱 실패가 크게 줄어듭니다. 둘째, <strong>"없음"을 데이터에 넣어야 합니다.</strong> 찾으라고 시킨 물체가 실제로 없는 샘플이 학습 데이터에 없으면, 모델은 언제나 무언가를 찾아냅니다. 2장에서 본 <em>부재를 표현하는 방향이 없다</em>는 문제가 여기서 환각 박스로 되돌아옵니다.</p>
+  <p>마지막으로 <strong>순서</strong> 문제가 있습니다. 객체 집합에는 순서가 없지만 시퀀스에는 있어야 합니다. 정답을 늘 왼쪽 위부터 적으면 모델은 <em>내용 대신 순서 규칙</em>을 외우고, 그 규칙이 깨지는 장면에서 무너집니다. Pix2Seq는 학습마다 객체 순서를 무작위로 섞는 편이 낫다고 보고했습니다.</p>
+
+  <div class="lab">
+    <div class="lab-tag">LAB 4-2 · 참조 표현 → 대상 선택</div>
+    <h3>말을 좌표로 푸는 아주 작은 파서</h3>
+    <p class="hint">표현을 고르거나 직접 써 보세요. 색·종류로 후보를 거르고, 순서·최상급·관계로 좁혀 하나를 고릅니다. <b>규칙 몇 줄로 짠 파서</b>이므로 금방 한계가 드러납니다 — 그 한계가 어디인지가 이 LAB의 핵심입니다.</p>
+    <div class="row">
+      <div>
+        <canvas id="g2_cv" aria-label="색과 모양이 다른 도형 7개가 놓인 장면"></canvas>
+        <div class="legend">
+          <span><i class="v"></i>후보(점선)</span>
+          <span><i class="ok"></i>최종 선택</span>
+        </div>
+      </div>
+      <div class="ctl">
+        <div>
+          <label for="g2_q">참조 표현</label>
+          <input type="text" id="g2_q" class="io" value="왼쪽에서 두 번째 파란 사각형" spellcheck="false">
+          <div class="chips" id="g2_ex">
+            <button type="button" data-q="왼쪽에서 두 번째 파란 사각형" class="sel">왼쪽에서 두 번째 파란 사각형</button>
+            <button type="button" data-q="가장 큰 파란 사각형">가장 큰 파란 사각형</button>
+            <button type="button" data-q="위에서 첫 번째 파란 사각형">위에서 첫 번째 파란 사각형</button>
+            <button type="button" data-q="초록 삼각형 왼쪽에 있는 빨간 원">초록 삼각형 왼쪽에 있는 빨간 원</button>
+            <button type="button" data-q="가장 작은 도형">가장 작은 도형</button>
+            <button type="button" data-q="파란 사각형">파란 사각형</button>
+            <button type="button" data-q="커피잔 옆에 있는 그거">커피잔 옆에 있는 그거</button>
+          </div>
+        </div>
+        <div class="stat" id="g2_out"></div>
+      </div>
+    </div>
+    <div class="parsed" id="g2_steps"></div>
+    <p class="hint" style="margin:14px 0 0">관찰 포인트 — <b>①</b> <code>파란 사각형</code>은 후보 3개에서 멈춥니다. 사람은 이럴 때 되묻지만, 모델은 <b>반드시 하나를 뱉습니다</b>. <b>②</b> 관계 표현에서 후보가 여럿이면 파서가 "가장 가까운 것"이라는 <b>임의의 규칙</b>으로 결정합니다 — 학습된 모델도 데이터에서 이런 규칙을 암묵적으로 배웁니다. <b>③</b> 마지막 표현은 어휘를 벗어나 실패합니다. 규칙 파서의 어휘를 무한히 늘리는 대신 <b>언어 모델을 쓰는</b> 이유가 정확히 이것입니다.</p>
+  </div>
+
+  <p>LAB 4-2의 파서는 "왼쪽"을 <em>화면 기준 x좌표</em>로 처리했습니다. 그런데 사람의 "왼쪽"은 때로 <em>사진 속 인물 기준</em>이고, "앞"은 카메라 기준이기도 깊이 기준이기도 합니다. 참조 표현 데이터가 가르치는 것은 결국 <strong>이런 관습의 통계</strong>입니다. 그래서 도메인이 바뀌면(예: 위에서 내려다본 시점) 같은 단어가 다른 좌표를 뜻하게 되고, 그라운딩 성능이 조용히 무너집니다.</p>
+
+  <h2>4. 생성형 검출이 무너지는 자리</h2>
+  <p>LAB 4-1의 고장 프리셋들은 전부 실제로 관찰되는 실패들입니다. 정리하면 여섯 가지입니다.</p>
+  <ul>
+    <li><strong>포맷 붕괴</strong> — 괄호·따옴표 불균형, 키 이름 변형, 설명 문장 섞임("이미지에서 3개를 찾았습니다: …"). 온도가 0이 아니면 확률이 크게 올라갑니다.</li>
+    <li><strong>잘림</strong> — 생성 길이 상한에 걸려 마지막 객체가 반쯤 잘립니다. 객체가 많은 장면일수록 흔하고, <em>조용히</em> 일어납니다. 박스 하나에 15토큰이면 50개는 750토큰입니다.</li>
+    <li><strong>환각 박스</strong> — 없는 물체를 찾아냅니다. 객체 환각은 POPE 같은 벤치마크가 따로 만들어질 만큼 체계적인 현상이고, 특히 "있나요?"류 질문에 <em>있다</em>고 답하는 쪽으로 치우칩니다. 검출로 오면 빈 배경에 박스가 생깁니다.</li>
+    <li><strong>누락과 조기 종료</strong> — 반대 방향의 실패입니다. 자기회귀 생성은 EOS를 일찍 내는 편이 안전하다고 배우기 쉽습니다. Pix2Seq는 이 편향을 막으려고 가짜 객체를 섞어 시퀀스를 늘리고 EOS를 늦추는 증강을 넣었습니다.</li>
+    <li><strong>중복</strong> — NMS가 없으니 거의 같은 박스가 두 번 나올 수 있습니다. 후처리에서 IoU 기준 중복 제거를 <em>직접</em> 넣어야 합니다.</li>
+    <li><strong>좌표계 불일치</strong> — 가장 잡기 어려운 버그입니다. 모델이 본 캔버스는 원본 이미지가 아닙니다. 리사이즈·레터박스 패딩·타일 분할을 거쳤다면 <strong>출력 좌표를 원본 좌표로 되돌리는 역변환</strong>이 필요합니다. 검출 파이프라인에서 레터박스 오프셋을 빼먹어 본 적이 있다면, 정확히 그 버그입니다.</li>
+  </ul>
+  <p>여기에 이산화 오차가 조용히 깔려 있습니다. 앞의 다섯은 로그를 보면 보이지만, 이산화 오차는 <strong>지표가 조금 낮은 것</strong>처럼만 보입니다. 그래서 평가를 시작하기 전에 "이 표기법의 IoU 천장이 얼마인가"를 먼저 재는 습관이 필요합니다.</p>
+
+  <h2>5. 디코딩을 통제하기</h2>
+  <p>좌표 출력에서 <strong>샘플링은 거의 항상 손해입니다.</strong> 문장 생성에서 다양성은 미덕이지만, 좌표에서 다양성은 그냥 오차입니다. 온도를 0으로 두는 것이 출발점입니다.</p>
+  <p>그다음이 <strong>제약 디코딩</strong>입니다. 발상은 단순합니다 — 매 스텝에서 <em>문법이 허용하지 않는 토큰의 로짓을 −∞로 만듭니다.</em> 그러면 모델은 문법에 맞는 문자열만 생성할 수 있습니다. 정규식이나 문맥자유문법을 유한 상태 기계로 미리 컴파일해 두면 토큰당 추가 비용도 거의 없습니다(Outlines가 이 방식을 정리했고, XGrammar 계열이 더 빠르게 만들었습니다). 좌표 문법은 이런 모양입니다.</p>
+  <pre><code>out   ::= line*
+line  ::= "&lt;ref&gt;" text "&lt;/ref&gt;" "&lt;box&gt;" box "&lt;/box&gt;" "\n"
+box   ::= "(" int "," int ")" "," "(" int "," int ")"
+int   ::= [0-9] | [1-9][0-9] | [1-9][0-9][0-9] | "1000"</code></pre>
+  <p>이 문법을 걸면 <strong>괄호 누락·잘못된 키·설명 문장 섞임이 원천적으로 사라집니다.</strong> LAB 4-1의 "괄호 누락"과 "출력 잘림" 프리셋이 만드는 실패는 대부분 여기서 없어집니다.</p>
+  <p>다만 두 가지를 분명히 해야 합니다.</p>
+  <ul>
+    <li><strong>문법은 구문만 보장합니다.</strong> <code>(0,0),(1000,1000)</code>은 완벽하게 유효한 문자열이고 완벽하게 틀린 박스입니다. 스케일 혼동도 문법을 통과합니다. 형식 검증과 내용 검증은 다른 일입니다.</li>
+    <li><strong>형식을 강하게 묶으면 추론이 나빠질 수 있습니다.</strong> 출력 형식 제약이 모델의 추론 품질을 떨어뜨릴 수 있다는 보고가 있습니다. 좌표만 뽑는 태스크에서는 대개 이득이 크지만, 근거를 설명하면서 좌표도 내야 하는 태스크라면 <em>생각은 자유롭게, 마지막 블록만 제약</em>하는 절충이 낫습니다.</li>
+  </ul>
+  <p>그래서 실무 기본값은 <strong>"느슨하게 생성하고 견고하게 파싱한다"</strong>이고, 제약 디코딩은 그 위에 얹는 안전장치입니다. 파서는 대체로 이 순서로 짭니다.</p>
+  <ol>
+    <li>코드 펜스·설명 문장을 걷어내고 <strong>구조 후보를 추출</strong>합니다(JSON 객체, 태그 구간, 줄).</li>
+    <li>구간마다 <strong>숫자 네 개</strong>를 뽑습니다. 엄격 정규식이 실패하면 느슨한 추출로 한 번 더 시도합니다.</li>
+    <li><strong>스케일을 판별</strong>합니다. 값이 전부 1 이하면 비율, 1000을 넘으면 픽셀 — 규칙을 명시하고 로그를 남깁니다.</li>
+    <li><strong>정렬·클램프·퇴화 제거</strong>: x1&gt;x2 교환, 이미지 경계로 클램프, 넓이 0 박스 폐기.</li>
+    <li><strong>중복 제거</strong>와 개수 상한.</li>
+    <li>남은 것을 <strong>원본 좌표계로 역변환</strong>합니다.</li>
+  </ol>
+  <div class="note">
+    <b>규칙마다 카운터를 남기세요.</b> "느슨한 추출로 살린 줄 수", "x 교환한 박스 수", "폐기한 퇴화 박스 수" — 이 숫자들이 모델·프롬프트·양자화 설정을 바꿨을 때 가장 먼저 움직이는 지표입니다. 복구 규칙이 조용히 문제를 덮으면, 지표는 좋은데 원인을 모르는 상태가 됩니다.
+  </div>
+
+  <h2>6. 박스 너머 — 점과 마스크</h2>
+  <p>박스가 유일한 답은 아닙니다. 좌표를 말하게 하는 방법에는 세 층위가 있습니다.</p>
+  <h3>6-1. 점 — 가장 싼 좌표</h3>
+  <p>Molmo는 박스 대신 <strong>점</strong>을 내놓습니다. 이미지 크기의 백분율로 <code>x</code>, <code>y</code> 두 값을 XML 태그에 적는 방식입니다. 점은 숫자가 절반이라 짧고, 여러 개를 나열하기 쉬워 <strong>개수 세기</strong>와 잘 맞습니다 — 세는 대신 짚고, 짚은 것을 세면 됩니다. 그리고 점은 곧 <strong>클릭 좌표</strong>입니다. 화면을 조작하는 에이전트에게는 박스보다 점이 더 자연스러운 출력입니다(14장).</p>
+  <p>대신 점에는 크기가 없습니다. 겹친 물체를 구분하기 어렵고, IoU로 채점할 수도 없습니다.</p>
+  <h3>6-2. 마스크 — 좌표를 직접 쓰지 않는 길</h3>
+  <p>세그멘테이션은 좌표를 글자로 쓰기에 가장 나쁜 대상입니다. 폴리곤 하나가 점 수십 개니까요. Florence-2는 그래도 폴리곤 좌표를 위치 토큰으로 적는 길을 갔지만, 다른 계열은 <strong>생성을 포기하고 임베딩을 넘깁니다.</strong> LISA는 출력 문장에 <code>&lt;SEG&gt;</code> 토큰 하나를 두고, 그 자리의 히든 임베딩을 마스크 디코더(SAM)에 넘겨 마스크를 얻습니다. 언어 모델은 <em>어디를</em>만 정하고, 픽셀 단위 경계는 전문 디코더가 그립니다.</p>
+  <h3>6-3. 후보를 미리 찍어두기</h3>
+  <p>세 번째 길은 좌표 생성을 아예 우회합니다. Set-of-Mark는 이미지를 미리 분할해 영역마다 <strong>번호를 그려 넣고</strong>, 모델에게는 번호만 말하게 합니다. 좌표 정확도 문제가 통째로 사라지는 대신, 사전 분할기가 필요하고 그 분할기가 놓친 것은 영원히 못 고릅니다.</p>
+  <p>정리하면 — <strong>직접 생성 · 임베딩 위임 · 후보 지시.</strong> 필요한 정밀도와 붙일 수 있는 부품에 따라 고르는 문제입니다.</p>
+
+  <h2>7. 텍스트 출력을 채점하기</h2>
+  <p>이제 마지막 질문입니다. 출력이 문자열인데 <strong>IoU와 mAP를 어떻게 붙일까요?</strong></p>
+  <p>REC처럼 답이 하나면 쉽습니다. 파싱해서 IoU를 재고, <strong>0.5 이상이면 정답</strong>으로 세는 정확도(Acc@0.5)가 표준입니다.</p>
+  <p>검출은 까다롭습니다. <strong>mAP는 랭킹을 전제합니다.</strong> 점수 순으로 정렬해 PR 곡선을 그려야 하는데, 생성 모델의 출력에는 점수가 없습니다. 선택지는 둘입니다 — 시퀀스(또는 클래스 토큰)의 <strong>로그확률을 점수로 쓰거나</strong>(Pix2Seq가 이 방식을 씁니다), 랭킹을 포기하고 <strong>단일 운용점의 정밀도·재현율·F1</strong>만 보고하는 것입니다. 점수 없이 뽑은 결과 집합 하나로 계산한 AP는 사실상 곡선 위의 <em>점 하나</em>이고, 검출기의 AP와 나란히 놓으면 오해를 부릅니다.</p>
+  <p>무엇을 쓰든, 규칙 네 개는 미리 못 박고 시작해야 합니다.</p>
+  <ol>
+    <li><strong>파싱 실패 = 미검출.</strong> 실패한 샘플을 평가에서 빼면 지표가 부풀고, 이 태스크에서 가장 중요한 실패 모드가 지표에서 사라집니다. <strong>파싱 성공률을 항상 함께 보고하세요.</strong></li>
+    <li><strong>중복 처리 규칙을 명시.</strong> 중복 제거를 어떤 IoU에서 하는지에 따라 FP 수가 달라집니다. NMS를 안 쓴다고 후처리가 없는 것이 아닙니다.</li>
+    <li><strong>좌표계 역변환 후 평가.</strong> 모델 입력 캔버스가 아니라 원본 이미지 좌표에서 재야 합니다.</li>
+    <li><strong>이산화 천장을 먼저 측정.</strong> 정답 박스를 그 표기법으로 양자화했다가 되돌렸을 때의 IoU가 그 설정의 상한입니다. LAB 4-1의 "IoU 상한"이 바로 이 값입니다. 상한이 0.82인 설정에서 IoU 0.75를 얻었다면, 남은 문제는 모델이 아니라 표기법일 수 있습니다.</li>
+  </ol>
+  <p>점 출력은 또 다릅니다. IoU가 없으니 <strong>정답 마스크·박스 안에 들어갔는가</strong>, 또는 정규화 거리로 채점합니다. 개수 세기 과제라면 점의 개수가 곧 답입니다.</p>
+  <p><strong>한 줄 정리</strong> — 좌표를 말하게 하는 순간 검출은 <em>인식 문제</em>에서 <em>인식 + 표기 + 파싱 문제</em>가 됩니다. 지표가 낮을 때 셋 중 무엇이 원인인지 분리해서 볼 수 있어야 합니다.</p>
+
+  <h2>8. 확인 문제</h2>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 4-1</div>
+    <p class="q">좌표 표기의 구간 수를 1,000에서 50으로 줄이면 가장 먼저 무슨 일이 생길까요?</p>
+    <div class="opts" id="q1">
+      <button type="button" data-a="0">모든 박스의 IoU가 똑같은 비율로 낮아집니다</button>
+      <button type="button" data-a="1">작은 객체부터 IoU 상한이 내려가고, 결국 완벽하게 예측해도 0.5를 못 넘는 객체가 생깁니다</button>
+      <button type="button" data-a="0">토큰이 짧아지므로 정확도는 유지되고 속도만 빨라집니다</button>
+    </div>
+    <div class="expl" id="e1">이산화 오차는 <b>박스 크기에 상대적</b>입니다. 구간 폭 δ에 대해 IoU 하한이 대략 <code>(w−δ)(h−δ)/(w+δ)(h+δ)</code>이므로, w가 δ의 몇 배뿐인 작은 객체에서 먼저 무너집니다. LAB 4-1에서 가장 작은 도형의 IoU 상한은 1,000 구간에서 1.00, 100 구간에서 0.71, 50 구간에서 0.43입니다 — 큰 도형은 같은 구간에서 거의 멀쩡한데 말입니다.</div>
+  </div>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 4-2</div>
+    <p class="q">평가 스크립트에서 "JSON 파싱에 실패한 샘플은 건너뛴다"고 처리하면 무엇이 문제일까요?</p>
+    <div class="opts" id="q2">
+      <button type="button" data-a="0">파싱 실패는 모델 성능과 무관한 인프라 문제이므로 제외가 맞습니다</button>
+      <button type="button" data-a="1">지표가 실제보다 높게 나오고, 이 태스크의 핵심 실패 모드인 포맷 안정성이 지표에서 사라집니다</button>
+      <button type="button" data-a="0">파싱 실패 샘플은 항상 어려운 이미지이므로 난이도 편향만 조금 생깁니다</button>
+    </div>
+    <div class="expl" id="e2">파싱 실패는 <b>미검출</b>로 세야 합니다. 제외하면 잘 답한 샘플만 남은 부분집합을 보고하는 셈이 되고, 포맷이 불안정한 모델일수록 지표가 좋아 보이는 뒤집힌 상황이 생깁니다. <b>파싱 성공률을 항상 병기</b>하는 것이 최소한의 방어입니다.</div>
+  </div>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 4-3</div>
+    <p class="q">JSON 스키마 기반 제약 디코딩을 걸었습니다. 무엇이 보장될까요?</p>
+    <div class="opts" id="q3">
+      <button type="button" data-a="0">박스 좌표가 정답에 더 가까워지고 환각 박스가 사라집니다</button>
+      <button type="button" data-a="0">모델이 객체 개수를 정확히 세게 되어 누락이 없어집니다</button>
+      <button type="button" data-a="1">출력이 문법에 맞는다는 것만 보장됩니다 — 좌표가 옳은지, 그 물체가 실제로 있는지는 별개입니다</button>
+    </div>
+    <div class="expl" id="e3">제약 디코딩은 매 스텝 <b>문법이 허용하지 않는 토큰을 마스킹</b>할 뿐입니다. <code>(0,0),(1000,1000)</code>도, 없는 물체에 대한 박스도 문법은 통과합니다. 구문 검증과 내용 검증은 분리해서 재야 하고, 형식을 지나치게 묶으면 추론 품질이 오히려 떨어질 수 있다는 보고도 있습니다.</div>
+  </div>
+
+  <div class="refs">
+    <h2>더 읽을거리</h2>
+    <ol>
+      <li>Chen et al., <a href="https://arxiv.org/abs/2109.10852">Pix2Seq: A Language Modeling Framework for Object Detection</a>, ICLR 2022 — 좌표 양자화, 객체 순서 무작위화, 조기 EOS를 막는 시퀀스 증강. 비교 대상으로 Carion et al., <a href="https://arxiv.org/abs/2005.12872">DETR</a>, ECCV 2020 — 집합 예측으로 NMS를 없앤 쪽.</li>
+      <li>Peng et al., <a href="https://arxiv.org/abs/2306.14824">Kosmos-2: Grounding Multimodal Large Language Models to the World</a>, 2023 — 32×32 격자의 <code>&lt;loc&gt;</code> 토큰과 대규모 그라운디드 코퍼스(GrIT).</li>
+      <li>Bai et al., <a href="https://arxiv.org/abs/2308.12966">Qwen-VL</a>, 2023 — 0~1000 정규화 정수 좌표와 <code>&lt;box&gt;</code>/<code>&lt;ref&gt;</code> 표기. 이어서 <a href="https://arxiv.org/abs/2502.13923">Qwen2.5-VL</a>, 2025 — 절대 픽셀 좌표와 JSON 출력으로의 전환.</li>
+      <li>Xiao et al., <a href="https://arxiv.org/abs/2311.06242">Florence-2</a>, CVPR 2024 — 위치 토큰 하나로 박스·쿼드박스·폴리곤을 통일한 시퀀스 인터페이스. 대비되는 설계로 Chen et al., <a href="https://arxiv.org/abs/2306.15195">Shikra</a>, 2023 — 어휘를 늘리지 않는 자연어 좌표.</li>
+      <li>Yu et al., <a href="https://arxiv.org/abs/1608.00272">Modeling Context in Referring Expressions (RefCOCO/RefCOCO+)</a>, ECCV 2016 · Mao et al., <a href="https://arxiv.org/abs/1511.02283">Generation and Comprehension of Unambiguous Object Descriptions (RefCOCOg)</a>, CVPR 2016 — 참조 표현 데이터의 수집 방식이 언어의 성격을 어떻게 바꾸는가.</li>
+      <li>Li et al., <a href="https://arxiv.org/abs/2112.03857">GLIP</a>, CVPR 2022 — 검출을 구(phrase) 그라운딩으로 재정의해 검출 데이터와 그라운딩 데이터를 합친 사례.</li>
+      <li>Deitke et al., <a href="https://arxiv.org/abs/2409.17146">Molmo and PixMo</a>, 2024 — 포인팅 출력과 그 데이터. 마스크 쪽으로는 Lai et al., <a href="https://arxiv.org/abs/2308.00692">LISA</a>, CVPR 2024 — <code>&lt;SEG&gt;</code> 임베딩을 마스크 디코더에 넘기는 방식 · Yang et al., <a href="https://arxiv.org/abs/2310.11441">Set-of-Mark Prompting</a>, 2023 — 좌표 생성을 우회하는 번호 지시.</li>
+      <li>Willard &amp; Louf, <a href="https://arxiv.org/abs/2307.09702">Efficient Guided Generation for LLMs (Outlines)</a>, 2023 · Dong et al., <a href="https://arxiv.org/abs/2411.15100">XGrammar</a>, 2024 — 제약 디코딩의 구현. 함께 볼 것: Tam et al., <a href="https://arxiv.org/abs/2408.02442">Let Me Speak Freely?</a>, EMNLP 2024 — 형식 제약이 추론에 주는 영향.</li>
+      <li>Li et al., <a href="https://arxiv.org/abs/2305.10355">Evaluating Object Hallucination in Large Vision-Language Models (POPE)</a>, EMNLP 2023 — 환각 박스의 뿌리를 재는 방법.</li>
+    </ol>
+  </div>
+
+  <div class="next">
+    이전 장 — <a href="03.html">03 해상도와 토큰 예산</a><br>
+    다음 장 — <a href="05.html"><b>05 제로샷 검출의 하한선</b></a>: 좌표를 말할 줄 아는 모델에게 학습 없이 내 도메인을 던지면 어디까지 될까요. 그리고 어디서, 어떤 모양으로 무너질까요.
+  </div>
+
+  <footer>VLM 워크북 · 개인 학습 노트 · 인터랙티브 실습은 전부 브라우저 안에서 돕니다.</footer>
+</main>
+</div>
+
+<script defer src="../assets/js/site.js"></script>
+<script defer src="../assets/js/labs/ch04-boxtext.js"></script>
+<script defer src="../assets/js/labs/ch04-refexp.js"></script>
+</body>
+</html>

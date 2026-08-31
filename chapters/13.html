@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>13 비디오 — 시간축 토큰 — VLM 워크북</title>
+<meta name="description" content="프레임 샘플링과 시간 토큰 압축, 위치 인코딩의 시간축 확장, 긴 비디오 처리와 스트리밍 — 그리고 시간을 보지 않는 모델을 진단하는 법.">
+<script>try{var t=localStorage.getItem('vlmwb_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="../assets/css/base.css">
+<style>
+/* 13장 전용 — 이벤트 판정 목록과 진단 표 */
+.ev{display:flex;align-items:center;gap:9px;font-size:12.5px;padding:6px 0;
+  border-bottom:1px solid var(--line)}
+.ev:last-child{border-bottom:none}
+.ev .ix{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--tx3);
+  width:12px;flex:none}
+.ev .nm{flex:1;min-width:0;color:var(--tx2)}
+.ev .du{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--tx3);flex:none}
+.ev .st{font-family:'IBM Plex Mono',monospace;font-size:10.5px;flex:none;white-space:nowrap;
+  border:1px solid var(--line);border-radius:999px;padding:2px 8px;color:var(--tx3)}
+.ev .st.ok{color:var(--ok);border-color:var(--ok)}
+.ev .st.part{color:var(--lang);border-color:var(--lang)}
+.ev .st.miss{color:var(--bad);border-color:var(--bad)}
+.budget{height:8px;border-radius:4px;background:var(--panel2);overflow:hidden;margin-top:6px}
+.budget i{display:block;height:100%;width:0;background:var(--vis)}
+.qr{display:flex;align-items:center;gap:8px;font-size:12.5px;padding:7px 0;
+  border-bottom:1px solid var(--line);flex-wrap:wrap}
+.qr:last-child{border-bottom:none}
+.qr.dim{opacity:.35}
+.qr .kk{font-family:'IBM Plex Mono',monospace;font-size:10px;flex:none;
+  border-radius:999px;padding:2px 7px;border:1px solid var(--line);color:var(--tx3)}
+.qr .kk.time{color:var(--vis);border-color:var(--vis)}
+.qr .qq{flex:1;min-width:150px;color:var(--tx2)}
+.qr .aa{font-family:'IBM Plex Mono',monospace;font-size:11.5px;flex:none;
+  width:74px;text-align:right}
+.qr .aa.ok{color:var(--ok)}
+.qr .aa.no{color:var(--bad)}
+#sh_mat th{font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;
+  color:var(--tx3);font-weight:600;text-transform:uppercase}
+#sh_mat td.num{font-family:'IBM Plex Mono',monospace}
+#sh_mat td.hi{color:var(--vis)}
+#sh_mat td.flat{color:var(--bad)}
+#sh_mat td.drop{color:var(--ok)}
+.headrow{display:flex;gap:8px;font-size:10.5px;font-family:'IBM Plex Mono',monospace;
+  color:var(--tx3);letter-spacing:.06em;padding-bottom:4px;border-bottom:1px solid var(--line)}
+.headrow .sp{flex:1}
+.headrow span.aa{width:74px;text-align:right;flex:none}
+</style>
+</head>
+<body data-chapter="13">
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+<div class="wrap">
+<nav class="rail" aria-label="목차"></nav>
+
+<main id="main">
+  <div class="eyebrow">CHAPTER 13</div>
+  <h1>비디오 — 시간축 토큰</h1>
+  <p class="lede">지금까지 다룬 이미지 한 장은 이미 수백 개의 토큰이었습니다. 이제 그 이미지가 <b>초당 서른 장</b>씩 들어옵니다. 비디오 VLM의 거의 모든 설계는 여기서 갈라집니다 — 어떤 프레임을 고를 것인가, 고른 프레임을 얼마나 눌러 담을 것인가, 그리고 <b>"몇 번째"라는 정보를 어디에 적어 둘 것인가.</b></p>
+
+  <h2>1. 사실 여러분은 이미 비디오를 다루고 있었습니다</h2>
+  <p>검출 파이프라인에서 비디오는 사실상 <strong>프레임의 배열</strong>입니다. 디코딩하고, 프레임마다 검출기를 돌리고, 프레임 사이를 트래커로 잇습니다. 시간은 모델 <em>바깥</em>에 있습니다 — 모델은 매번 한 장만 보고, 시간축은 IoU 매칭이나 칼만 필터 같은 <strong>후처리 로직</strong>이 담당합니다.</p>
+  <p>그래서 이 구조에는 좋은 성질이 있습니다. 프레임 수가 늘어도 비용이 <strong>선형</strong>으로만 자랍니다. 30분짜리 영상은 1분짜리의 딱 30배입니다. 메모리도 한 프레임분이면 충분합니다.</p>
+  <p>비디오 VLM은 그 경계를 지웁니다. 프레임을 토큰으로 바꾼 다음 <strong>시간축까지 하나의 시퀀스에 밀어 넣습니다</strong>. 트래커가 하던 일을 어텐션이 대신 하는 셈입니다. "저 사람이 <em>아까</em> 들고 있던 물건을 <em>지금</em> 내려놓았나요?"처럼 프레임을 가로지르는 질문을 후처리 규칙 없이 물어볼 수 있게 되는 것이 이 구조의 값어치입니다.</p>
+  <p>대가는 즉시 청구됩니다. 448×448 프레임 하나가 256토큰이라고 해봅시다. 30fps로 <strong>1분</strong>이면 1,800프레임 × 256 = <span class="tok v">460,800토큰</span>입니다. 3장에서 다룬 토큰 예산 문제가 여기서는 <strong>두 자릿수 더 나쁜 형태</strong>로 돌아옵니다. 어텐션 비용은 시퀀스 길이의 제곱이므로, 사실상 불가능한 숫자입니다.</p>
+  <div class="note">
+    <b>이 장의 한 줄.</b> 비디오 VLM 설계는 결국 <em>버리는 기술</em>입니다. 무엇을 버려도 질문에 답할 수 있는지를 정하는 일이고, 그 결정이 곧 프레임 샘플링·시간 압축·메모리 구조입니다.
+  </div>
+
+  <h2>2. 프레임 샘플링 — fps 하나가 예산 전체를 정합니다</h2>
+  <p>제일 먼저 버리는 것은 프레임입니다. 방법은 크게 셋입니다.</p>
+  <ul>
+    <li><strong>균등 샘플링</strong> — 클립을 N등분해 N장을 뽑습니다. 초기 비디오 VLM 다수가 이 방식이고, Video-LLaVA는 <strong>8프레임</strong>, Video-ChatGPT는 100프레임을 균등하게 뽑았습니다. 구현이 단순하고 편향이 없다는 것이 장점입니다. 대신 <em>클립이 길어지면 프레임 간격이 함께 늘어납니다</em> — 3분짜리에서 8장을 뽑으면 22초에 한 장입니다.</li>
+    <li><strong>고정 fps 샘플링</strong> — "초당 2장"처럼 <em>시간 간격</em>을 고정합니다. Qwen2-VL이 비디오를 <strong>2fps</strong>로 읽습니다. 간격이 일정하므로 "몇 초"라는 감각이 보존되지만, 클립이 길어지면 토큰 수가 그대로 선형으로 자랍니다. 그래서 보통 <strong>상한</strong>을 함께 겁니다(Qwen2-VL은 비디오 토큰 총량을 16,384로 제한하고, 길면 fps를 낮춥니다).</li>
+    <li><strong>키프레임 / 적응 샘플링</strong> — 장면 전환이나 프레임 차분이 큰 지점을 골라 뽑습니다. 같은 예산으로 정보 밀도를 올릴 수 있지만, <em>조용한 구간을 통째로 굶길</em> 위험이 있습니다. 정지된 화면에서 갑자기 시작되는 이상 상황이라면 오히려 그 직전을 놓칠 수 있습니다.</li>
+  </ul>
+  <p>여기서 이 장 전체를 관통하는 감각이 하나 나옵니다. <strong>샘플링 간격이 이벤트 길이보다 길면, 그 이벤트는 존재하지 않았던 것이 됩니다.</strong> 0.4초짜리 손동작은 1fps에서 절반 이상 사라지고, 0.2초짜리 깜박임은 4fps로도 위태롭습니다. 검출 파이프라인이라면 프레임 단위로 다 훑었을 것들입니다.</p>
+
+  <div class="lab">
+    <div class="lab-tag">LAB 13-1 · 프레임 샘플링 → 토큰 예산</div>
+    <h3>무엇을 뽑고, 무엇을 잃는가</h3>
+    <p class="hint">30초짜리 가상 클립에 길이가 제각각인 이벤트 5개가 심어져 있습니다(6.60초짜리부터 0.17초짜리까지). 위쪽 곡선은 프레임 차분 같은 <b>움직임 신호</b>, 세로 눈금은 실제로 뽑힌 프레임입니다. <b>관찰 포인트</b> — ① 이벤트 길이와 샘플링 간격의 비 ② 같은 토큰 수에서 균등과 적응이 건지는 이벤트의 차이 ③ 해상도를 내려 산 예산을 fps에 부었을 때 무슨 일이 벌어지는지.</p>
+    <div id="v_tlwrap" style="width:100%"><canvas id="vtl" aria-label="30초 클립의 이벤트 타임라인과 샘플링 눈금"></canvas></div>
+    <div class="row" style="margin-top:16px">
+      <div class="ctl" style="min-width:240px">
+        <div>
+          <label>샘플링 방식</label>
+          <div class="seg" id="v_mode">
+            <button type="button" data-mode="uniform" class="sel">균등</button>
+            <button type="button" data-mode="adaptive">적응</button>
+            <button type="button" data-mode="keyframe">키프레임</button>
+          </div>
+        </div>
+        <div><label for="v_fps" id="v_fpslabel">샘플링 fps <b id="v_fpsv">2 fps</b></label>
+          <input type="range" id="v_fps" min="0" max="5" step="1" value="3"></div>
+        <div><label for="v_res">프레임 해상도 <b id="v_resv">448px</b></label>
+          <input type="range" id="v_res" min="0" max="3" step="1" value="2"></div>
+        <div><label for="v_tau">시간 압축(시간 패치) <b id="v_tauv">없음 (1:1)</b></label>
+          <input type="range" id="v_tau" min="0" max="3" step="1" value="0"></div>
+        <div class="stat">
+          샘플 프레임 <span id="v_n">60장</span><br>
+          시간 그룹 <span id="v_g">60묶음</span><br>
+          프레임당 토큰 <span id="v_per">256</span><br>
+          총 비디오 토큰 <b id="v_total">15,360</b><br>
+          16K 예산 대비 <span id="v_pct" class="good">94%</span><br>
+          1시간 환산 <span class="warn" id="v_hour">1.84M</span>
+          <div class="budget"><i id="v_bar"></i></div>
+        </div>
+      </div>
+      <div class="ctl" style="min-width:240px">
+        <div>
+          <label style="margin-bottom:6px">이벤트별 판정
+            <span style="color:var(--tx3)">(관측 = 시간 그룹 2개 이상)</span></label>
+          <div id="v_list"></div>
+        </div>
+        <p class="hint" style="margin:0;color:var(--tx3);font-size:12px">
+          <b>존재만</b>은 프레임이 한 묶음에만 걸렸다는 뜻입니다 — "있었다"는 말할 수 있어도
+          "어느 방향으로 변했다"는 말할 수 없습니다. 시간 압축을 올리면 관측이 이쪽으로 내려앉습니다.
+        </p>
+      </div>
+    </div>
+    <p class="hint" style="margin:14px 0 0" id="v_verdict"></p>
+    <p class="hint" style="margin:6px 0 0;color:var(--tx3)">토큰 산술은 Qwen2-VL 계열의 관례를 따랐습니다 — 패치 14px에 2×2 공간 병합이므로 토큰 하나가 28×28픽셀을 덮고, 시간 패치 τ는 연속한 τ장을 한 묶음으로 합칩니다. 브라우저 안에서 도는 계산이며 실제 모델을 부르지 않습니다.</p>
+  </div>
+
+  <p>몇 가지를 직접 확인해 보시길 권합니다. <strong>①</strong> 균등 2fps·448px는 예산의 94%를 쓰고도 0.17초짜리를 놓칩니다. <strong>②</strong> 해상도를 224px로 내리고 8fps로 올린 뒤 시간 압축을 2로 걸면 <em>토큰은 절반(47%)인데 건지는 이벤트는 더 많습니다.</em> 같은 예산이라도 <strong>어느 축에 쓰느냐가 결과를 뒤집습니다.</strong> <strong>③</strong> 키프레임만 쓰면 5프레임(예산의 8%)으로 끝나지만, 샷 안에서 벌어진 일은 구조적으로 볼 수 없습니다.</p>
+  <p>실무 감각으로 정리하면 이렇습니다. <strong>질문이 "무엇이 있었나"라면 해상도에, "언제 어떻게 변했나"라면 fps에 예산을 씁니다.</strong> 문서나 작은 글자를 읽어야 하는 비디오는 예외적으로 둘 다 필요하고, 그래서 가장 비쌉니다.</p>
+
+  <h2>3. 시간 토큰 압축 — 뽑은 다음에도 또 버립니다</h2>
+  <p>프레임을 골랐다고 끝이 아닙니다. 60장 × 256토큰은 여전히 15,360토큰이니까요. 그래서 프레임을 <em>토큰으로 바꾸는 단계</em>에서 한 번 더 압축합니다. 2장에서 본 공간 방향 압축(pixel-shuffle, 리샘플러)에 <strong>시간 방향</strong>이 하나 더 붙는 것입니다.</p>
+
+  <h3>3-1. 풀링 — 가장 단순한 답</h3>
+  <p>Video-ChatGPT의 방식이 교과서적입니다. 100프레임 각각을 ViT에 통과시켜 100×256개의 패치 피처를 얻은 뒤, <strong>시간축으로 평균</strong>내어 공간 토큰 256개를, <strong>공간축으로 평균</strong>내어 시간 토큰 100개를 만들고, 둘을 이어 붙여 <span class="tok v">356토큰</span>으로 끝냅니다. 25,600개가 356개가 되었습니다.</p>
+  <p>무엇을 잃었는지가 분명합니다. 시간축 평균 토큰에는 "어디서"가 없고, 공간축 평균 토큰에는 "언제"가 없습니다. <strong>"3초 시점에 화면 왼쪽 아래"</strong> 같은 시공간 결합 질문은 이 표현에서 원리적으로 답하기 어렵습니다. 대신 "전반적으로 무슨 영상인가"에는 잘 답합니다.</p>
+
+  <h3>3-2. 3D 패치 — 시공간 큐브로 자르기</h3>
+  <p>더 자연스러운 방법은 <strong>애초에 3차원으로 자르는 것</strong>입니다. 1장에서 이미지를 16×16 정사각으로 잘랐다면, 여기서는 <em>2×16×16</em> 같은 <strong>시공간 큐브</strong>로 자릅니다. ViViT이 이것을 "tubelet embedding"이라 불렀고, VideoMAE도 2×16×16 큐브를 씁니다.</p>
+  <p>Qwen2-VL이 이 발상을 실전 VLM에 넣은 대표 사례입니다. 3D 컨볼루션으로 <strong>연속한 2프레임을 하나의 토큰 묶음으로</strong> 만들고, 여기에 2×2 공간 병합을 곱합니다. 결과적으로 토큰 하나가 <strong>28×28픽셀 × 2프레임</strong>이라는 부피를 담당합니다. LAB 13-1의 "시간 압축" 슬라이더가 바로 이 τ입니다.</p>
+  <p>이 방식이 이치에 맞는 이유는 <strong>비디오의 인접 프레임이 지독하게 중복적</strong>이기 때문입니다. VideoMAE는 이 중복성을 근거로 <strong>90~95%</strong>를 가려버리고도 학습이 된다는 것을 보였습니다. 이미지에서 75% 정도를 가리던 MAE보다 훨씬 공격적인 숫자인데, 옆 프레임을 보면 답이 보이니 그만큼 어려운 문제를 내야 했던 것입니다.</p>
+  <p>다만 τ를 키우면 LAB에서 본 그대로 <strong>"관측"이 "존재만"으로 내려앉습니다</strong>. 두 프레임을 한 묶음으로 접었다는 것은 그 둘 사이의 변화를 토큰 내부에 뭉개 넣었다는 뜻이니까요.</p>
+
+  <h3>3-3. 슬로우–패스트 — 두 축을 동시에 사는 법</h3>
+  <p>"해상도냐 fps냐"는 사실 <strong>양자택일이 아닙니다</strong>. 비디오 인식 쪽에는 이미 답이 있었습니다. SlowFast 네트워크는 경로를 둘로 나눕니다 — <strong>느린 경로</strong>는 프레임을 드문드문 보되 채널을 두껍게 쓰고, <strong>빠른 경로</strong>는 프레임을 촘촘히 보되 얇게 씁니다. 공간 디테일과 빠른 움직임을 각각 다른 경로에 맡기는 것입니다.</p>
+  <p>SlowFast-LLaVA가 이 구조를 비디오 VLM으로 옮겼습니다. <strong>Slow</strong> 스트림은 적은 수의 프레임에 토큰을 넉넉히 배분하고, <strong>Fast</strong> 스트림은 많은 프레임을 강하게 풀링해 몇 토큰씩만 남긴 뒤, 둘을 이어 붙여 LLM에 넣습니다. 학습 없이 기존 이미지 VLM 위에 얹을 수 있다는 점이 실무적으로 매력적입니다.</p>
+  <p>이것을 LAB 13-1의 언어로 옮기면 <strong>"해상도 448에 1fps"와 "해상도 224에 8fps"를 동시에 사는 것</strong>입니다. 어느 한쪽 슬라이더를 포기하지 않아도 되는 구성이고, 그래서 이상 감지처럼 <em>디테일과 순간성을 함께 요구하는</em> 태스크에서 특히 잘 맞습니다.</p>
+
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>압축 방식</th><th>출력 토큰</th><th>남는 것</th><th>사라지는 것</th><th>대표</th></tr></thead>
+    <tbody>
+      <tr><td>압축 없음</td><td class="num">n × P</td><td>전부</td><td>—</td><td>짧은 클립 전용</td></tr>
+      <tr><td>시공간 평균 풀링</td><td class="num">P + n</td><td>전반적 내용</td><td>시공간 결합</td><td>Video-ChatGPT(356)</td></tr>
+      <tr><td>3D 패치(시간 τ)</td><td class="num">n/τ × P</td><td>공간 배치</td><td>τ 내부의 변화</td><td>ViViT · VideoMAE · Qwen2-VL(τ=2)</td></tr>
+      <tr><td>프레임당 소수 토큰</td><td class="num">n × 2</td><td>긴 범위</td><td>프레임 내 디테일</td><td>LLaMA-VID(2토큰)</td></tr>
+      <tr><td>슬로우–패스트</td><td class="num">n<sub>s</sub>P + n<sub>f</sub>k</td><td>디테일 + 순간성</td><td>중간 해상도</td><td>SlowFast-LLaVA</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2>4. 시간을 어디에 적어 두는가</h2>
+  <p>프레임을 토큰으로 만들어 한 줄로 이어 붙이면, 모델이 "이 토큰이 몇 번째 프레임 것인지" 알 방법이 필요합니다. 텍스트에서라면 위치 인코딩이 하던 일입니다. 비디오에서는 <strong>위치가 3차원(t, h, w)</strong>이 됩니다.</p>
+  <p>가장 소박한 방법부터 보겠습니다. <strong>텍스트로 적어 넣기</strong> — 프레임 토큰 사이에 <code>Frame 12 (4.0s):</code> 같은 문자열을 끼워 넣는 방식입니다. 놀랍게도 꽤 잘 동작하고, 기존 이미지 VLM에 즉시 적용할 수 있어 지금도 널리 쓰입니다. 대신 시간 정보가 <em>언어 채널</em>을 거치므로 토큰을 더 먹고, 프레임 수가 많아지면 그 오버헤드가 무시하기 어려워집니다.</p>
+  <p>제대로 된 방법은 <strong>위치 인코딩 자체를 시간축으로 확장하는 것</strong>입니다. Qwen2-VL의 <strong>M-RoPE</strong>가 대표적인데, 회전 위치 임베딩의 차원을 <span class="tok v">시간 · 높이 · 너비</span> 세 덩어리로 쪼갭니다. 텍스트 토큰은 세 값이 모두 같고(1차원처럼 동작하고), 이미지 토큰은 시간 값이 고정된 채 h·w만 움직이며, 비디오 토큰은 프레임이 넘어갈 때마다 시간 값이 증가합니다. <strong>같은 임베딩 체계 안에서 텍스트·이미지·비디오를 모두 표현할 수 있다</strong>는 점이 이 설계의 핵심입니다.</p>
+  <p>여기에 한 걸음 더 나간 것이 <strong>시간 인덱스를 실제 시각에 맞추는 것</strong>입니다. 프레임 번호를 그대로 쓰면 "10번째 프레임"이 2fps에서는 5초, 8fps에서는 1.25초로 <em>의미가 흔들립니다</em>. Qwen2.5-VL은 동적 fps 샘플링을 쓰면서 M-RoPE의 시간 인덱스를 <strong>절대 시각에 정렬</strong>해, 샘플링 속도가 바뀌어도 "몇 초"라는 감각이 유지되도록 했습니다. 이 정렬이 있어야 다음 절의 <em>이벤트 시점 지정</em>이 초 단위로 가능해집니다.</p>
+  <div class="note">
+    <b>트래커와 비교하면.</b> IoU 매칭은 "이 박스와 저 박스가 같은 객체"라는 <em>대응</em>만 만들고 시간 간격은 프레임 인덱스로 따로 관리했습니다. M-RoPE 계열은 그 대응과 간격을 <strong>같은 벡터 공간 안</strong>에 넣습니다 — 어텐션이 "3초 전"과 "0.1초 전"을 다르게 취급할 수 있게 되는 것입니다.
+  </div>
+
+  <h2>5. 긴 비디오 — 30초와 2시간은 다른 문제입니다</h2>
+  <p>지금까지의 기법을 다 동원해도 30초 클립을 1만 토큰 언저리로 만드는 것이 고작입니다. 2시간짜리 영상이라면 같은 설정에서 240배 — 벽에 부딪힙니다. 대응은 대략 네 갈래입니다.</p>
+  <ul>
+    <li><strong>fps를 더 낮추기.</strong> 가장 흔하고 가장 정직한 답입니다. 대신 LAB 13-1의 "놓침"이 그만큼 늘어납니다. 영화 줄거리 요약에는 충분하지만, 초 단위 사건에는 쓸 수 없습니다.</li>
+    <li><strong>슬라이딩 윈도 + 요약.</strong> 긴 영상을 구간으로 잘라 각 구간을 따로 처리하고, 구간 요약(텍스트든 토큰이든)만 이어서 다음 단계로 넘깁니다. 구현이 쉽고 병렬화도 되지만, <em>구간 경계를 가로지르는 관계</em>가 요약 과정에서 잘려나갑니다.</li>
+    <li><strong>메모리 구조.</strong> MovieChat은 사람의 기억을 흉내 내 <strong>단기 메모리</strong>(최근 프레임을 상세히)와 <strong>장기 메모리</strong>(오래된 것은 병합해 압축)를 나눠 들고 갑니다. 슬라이딩 윈도와 달리 오래된 정보가 완전히 버려지지는 않습니다.</li>
+    <li><strong>컨텍스트 자체를 늘리기.</strong> LongVA는 흥미로운 우회로를 택했습니다 — <em>텍스트에서</em> 긴 컨텍스트를 학습시킨 언어 모델에 시각 토큰을 붙였더니, 비디오로 긴 컨텍스트를 따로 학습하지 않고도 수천 프레임을 다룰 수 있었습니다. "긴 컨텍스트 능력이 모달리티를 건너 전이된다"는 관찰입니다.</li>
+  </ul>
+  <p>어느 쪽을 택하든 남는 질문은 같습니다. <strong>버린 것을 나중에 되찾을 수 있는가.</strong> 요약 토큰은 되찾을 수 없고, 메모리는 부분적으로 되찾을 수 있으며, 원본 프레임을 다시 읽을 수 있는 구조(검색 후 재조회)라면 완전히 되찾을 수 있습니다. 마지막 방식이 곧 14장의 에이전틱 루프입니다.</p>
+
+  <h2>6. 태스크마다 필요한 시간 해상도가 다릅니다</h2>
+  <p>"비디오 이해"라는 한 단어 안에 성격이 아주 다른 태스크들이 섞여 있습니다. 필요한 <strong>시간 해상도</strong>(얼마나 촘촘히)와 <strong>시간 범위</strong>(얼마나 멀리)가 태스크마다 다르고, 예산 배분은 그 둘로 결정됩니다.</p>
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>태스크</th><th>시간 해상도</th><th>시간 범위</th><th>예산을 어디에</th></tr></thead>
+    <tbody>
+      <tr><td>행동 인식 · 분류</td><td class="num">낮음</td><td class="num">짧음</td><td>해상도 쪽. 8~16프레임으로도 상당히 갑니다</td></tr>
+      <tr><td>요약 · 캡션</td><td class="num">낮음</td><td class="num">매우 김</td><td>범위 쪽. 낮은 fps + 메모리·요약</td></tr>
+      <tr><td>이벤트 시점 지정<br>(temporal grounding)</td><td class="num">높음</td><td class="num">김</td><td>fps + 시간 인코딩의 절대 시각 정렬</td></tr>
+      <tr><td>카운팅(반복 · 통과 객체)</td><td class="num">매우 높음</td><td class="num">중간</td><td>fps. 간격이 벌어지면 중복·누락이 즉시 발생</td></tr>
+      <tr><td>이상 감지</td><td class="num">높음</td><td class="num">김</td><td>둘 다. 슬로우–패스트가 잘 맞는 자리</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>세 번째 줄이 특히 까다롭습니다. <strong>이벤트 시점 지정</strong>은 "누가 문을 연 장면은 몇 초부터 몇 초까지인가"처럼 <em>답이 숫자</em>인 태스크입니다(Charades-STA류 벤치마크가 이것을 잽니다). 4장에서 좌표를 말하게 하던 문제의 시간축 버전인데, 두 가지가 동시에 필요합니다 — 경계를 분간할 만한 <strong>fps</strong>, 그리고 프레임 인덱스를 초로 옮길 수 있는 <strong>시간 표기</strong>. 둘 중 하나만 없어도 답은 그럴듯한 숫자로 흘러갑니다.</p>
+  <p>네 번째 줄은 검출 엔지니어에게 익숙한 함정입니다. 트래커 기반 카운팅에서 프레임을 건너뛰면 같은 객체를 새 ID로 잡아 <strong>중복 계수</strong>가 나거나, 빠르게 지나간 객체를 <strong>누락</strong>합니다. 비디오 VLM에서도 원인은 똑같이 <em>샘플링 간격</em>입니다. 달라진 것은 그 실패가 트래커 로그가 아니라 <strong>자신 있는 문장</strong>으로 나온다는 점뿐입니다.</p>
+
+  <h2>7. 평가의 함정 — 한 장만 보고도 맞히는 문제들</h2>
+  <p>비디오 VLM 평가에는 유명한 병이 하나 있습니다. <strong>많은 비디오 QA 문항이 사실은 이미지 QA</strong>라는 것입니다. "이 사람은 무슨 운동을 하고 있나요?"는 아무 프레임 한 장이면 답할 수 있습니다. 시간축이 필요 없는 질문에 시간 모델을 시험한 셈입니다.</p>
+  <p>이것은 추측이 아니라 측정된 사실입니다. 단일 프레임만 쓰도록 학습한 모델이 여러 프레임을 쓰는 모델과 대등하거나 더 나은 점수를 낸다는 보고가 있었고(single-frame bias), 프레임 하나를 고르는 <strong>무시간(atemporal) 프로브</strong>만으로도 여러 비디오-언어 벤치마크의 상당 부분이 풀린다는 분석도 나왔습니다. 벤치마크 점수가 올랐다고 해서 <em>모델이 시간을 이해하게 되었다</em>고 말할 수 없다는 뜻입니다.</p>
+  <p>그래서 진단이 필요합니다. 방법은 허무할 만큼 단순합니다 — <strong>프레임 순서를 망가뜨리고 점수가 떨어지는지 봅니다.</strong> 정답 라벨은 원본 기준으로 고정한 채 입력만 역순으로, 또는 무작위로 섞어 넣습니다. 점수가 그대로라면 그 답은 시간에서 나온 것이 아닙니다.</p>
+
+  <div class="lab">
+    <div class="lab-tag">LAB 13-2 · 시간 무시 진단 미니</div>
+    <h3>순서를 부수면 답이 바뀌나요?</h3>
+    <p class="hint">같은 8프레임 클립입니다 — 공은 왼쪽에서 오른쪽으로 굴러가고, 문은 점점 열리고, 조명은 중간에 켜집니다. 칸 아래 <b>#n</b>은 제시 순서, <b>fN</b>은 원본 프레임 번호입니다. 두 가상 모델의 답을 비교하세요. <b>관찰 포인트</b> — ① 순서를 바꿔도 답이 한 글자도 안 변하는 모델 ② 그 모델이 <em>원본에서는 만점</em>이라는 사실 ③ 외형 문항을 섞으면 진단이 얼마나 무뎌지는지.</p>
+    <div id="sh_wrap" style="width:100%"><canvas id="sh_strip" aria-label="8프레임 필름스트립"></canvas></div>
+    <div class="row" style="margin-top:16px">
+      <div class="ctl" style="min-width:230px;flex:0 1 240px">
+        <div>
+          <label>입력 프레임 순서</label>
+          <div class="seg" id="sh_order">
+            <button type="button" data-order="orig" class="sel">원본</button>
+            <button type="button" data-order="reverse">역순</button>
+            <button type="button" data-order="shuffle">셔플</button>
+          </div>
+        </div>
+        <div>
+          <label>채점 문항</label>
+          <div class="seg" id="sh_scope">
+            <button type="button" data-scope="all" class="sel">전체 5문항</button>
+            <button type="button" data-scope="time">순서 문항만</button>
+          </div>
+        </div>
+        <div class="tablebox" style="margin:0">
+          <table style="min-width:0"><tbody id="sh_mat"></tbody></table>
+        </div>
+      </div>
+      <div class="ctl" style="min-width:280px">
+        <div class="headrow"><span class="sp">문항</span>
+          <span class="aa">프레임 백</span><span class="aa">시간 인식</span></div>
+        <div id="sh_rows"></div>
+      </div>
+    </div>
+    <p class="hint" style="margin:14px 0 0" id="sh_verdict"></p>
+    <p class="hint" style="margin:6px 0 0;color:var(--tx3)">두 "모델"은 시뮬레이션입니다. 프레임 백 모델은 프레임을 집합으로만 보고 순서 문항은 학습 분포의 다수답으로 때우며, 시간 인식 모델은 제시된 순서에서 기울기와 선후를 실제로 읽습니다.</p>
+  </div>
+
+  <p>결과가 말하는 바는 분명합니다. 프레임 백 모델은 <strong>원본에서 5/5로 만점</strong>입니다. 점수만 보면 시간을 완벽히 이해하는 모델처럼 보입니다. 그런데 프레임을 뒤섞어도 여전히 5/5입니다 — <strong>하락폭 0%p</strong>. 이 0이 진단 결과입니다.</p>
+  <p>더 중요한 것은 <strong>채점 문항</strong> 토글입니다. 전체 5문항으로 재면 진짜 시간 모델의 하락폭도 60%p로 희석됩니다. 외형 문항 2개가 순서와 무관하게 계속 정답이기 때문입니다. <strong>순서 문항만 남기면 100%p</strong>가 됩니다. <em>진단은 시간에 의존하는 문항 위에서만 의미가 있습니다.</em> 벤치마크 전체 점수로 이 진단을 돌리면 아무것도 안 보입니다.</p>
+  <p>이 문제의식이 벤치마크 설계에도 반영되었습니다. MVBench는 단일 프레임으로는 풀 수 없도록 <strong>시간 이해 태스크 20종</strong>을 모았고, TempCompass는 같은 원본에서 <strong>역재생·속도 변경 같은 대조 비디오</strong>를 만들어 답이 따라 바뀌는지를 봅니다. EgoSchema는 문항을 풀기 위해 실제로 봐야 하는 최소 구간 길이를 <strong>certificate length</strong>라는 지표로 정의해, 문항이 얼마나 "긴 시간"을 요구하는지를 명시했습니다.</p>
+  <div class="note">
+    <b>내 데이터로 옮기면.</b> 자체 평가셋을 만들 때 문항마다 <em>"이 답을 한 프레임으로 맞힐 수 있는가"</em>를 표시해 두면, 나중에 시간 관련 개선의 효과를 그 부분집합에서만 따로 잴 수 있습니다. 전체 평균은 거의 언제나 개선을 가려버립니다.
+  </div>
+
+  <h2>8. 스트리밍 — 언제, 무엇을 보낼 것인가</h2>
+  <p>지금까지는 파일 하나가 통째로 있다고 가정했습니다. 실시간 카메라라면 전제가 달라집니다. <strong>클립의 끝이 아직 오지 않았고, 미래 프레임을 보고 샘플링 지점을 고를 수 없습니다.</strong> 균등 샘플링은 "전체를 N등분"하는 방식이니 애초에 성립하지 않습니다.</p>
+  <p>온라인 처리에서 생기는 결정은 셋입니다.</p>
+  <ol>
+    <li><strong>무엇을 보낼 것인가.</strong> 모든 프레임을 VLM에 넣을 수는 없습니다. 현실적인 구성은 <em>싼 트리거 + 비싼 판정</em>입니다 — 프레임 차분이나 기존 검출기가 후보 구간을 띄우고, 그 구간만 VLM이 봅니다. 이미 갖고 있는 검출 파이프라인이 <strong>샘플러 역할</strong>을 맡는 셈입니다.</li>
+    <li><strong>언제 말할 것인가.</strong> 사용자가 물을 때만 답하는 것이 아니라, <em>말할 만한 일이 생겼을 때</em> 먼저 말해야 하는 경우가 있습니다. VideoLLM-online 같은 연구가 "지금 발화할지 침묵할지"를 학습 대상으로 삼은 이유입니다. 매 프레임 문장을 생성하면 비용과 소음이 함께 폭발합니다.</li>
+    <li><strong>무엇을 기억할 것인가.</strong> 스트림에는 끝이 없으므로 컨텍스트를 무한히 늘릴 수 없습니다. 5절의 메모리 구조가 여기서 선택이 아니라 필수가 됩니다. Flash-VStream류가 다루는 문제입니다.</li>
+  </ol>
+  <p>지연 관점의 감각도 하나 붙여두면 좋습니다. 비디오 토큰은 대부분 <strong>프리필</strong>에서 소비됩니다. 첫 토큰까지의 지연은 대략 비디오 토큰 수에 비례하고, 어텐션 항까지 따지면 그보다 나쁘게 자랍니다. 즉 <strong>LAB 13-1에서 조절한 그 숫자가 곧 응답 지연입니다</strong>(11장). 실시간 요구가 있는 시스템이라면 fps와 해상도는 정확도 손잡이이기 전에 <em>지연 손잡이</em>입니다.</p>
+  <p><strong>한 줄 정리</strong> — 비디오 VLM은 프레임을 토큰으로 바꿔 시간축을 시퀀스 안으로 끌어들였고, 그 대가로 토큰 예산 문제가 두 자릿수 악화되었습니다. 샘플링·시간 압축·메모리는 전부 그 예산을 다루는 서로 다른 방식이며, 무엇을 버렸는지는 <strong>순서를 부수는 진단</strong>으로만 드러납니다.</p>
+
+  <h2>9. 확인 문제</h2>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 13-1</div>
+    <p class="q">30초 클립을 2fps로 샘플링하고, 448×448 프레임을 14px 패치 + 2×2 공간 병합으로 처리한 뒤 시간 패치 2를 적용하면 비디오 토큰은 몇 개일까요?</p>
+    <div class="opts" id="q1">
+      <button type="button" data-a="0">15,360개 — 60프레임 × 256</button>
+      <button type="button" data-a="1">7,680개 — 60프레임을 2장씩 30묶음으로 접고 × 256</button>
+      <button type="button" data-a="0">256개 — 시간 패치가 전체를 한 묶음으로 만듭니다</button>
+    </div>
+    <div class="expl" id="e1">토큰 하나가 28×28픽셀을 덮으므로 프레임당 (448÷28)² = <b>256토큰</b>, 30초 × 2fps = 60프레임, 시간 패치 2로 <b>30묶음</b> → 30 × 256 = <b>7,680토큰</b>입니다. 시간 패치는 <em>연속한 τ장</em>을 묶는 것이지 전체를 하나로 만드는 것이 아닙니다.</div>
+  </div>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 13-2</div>
+    <p class="q">비디오 QA 평가셋에서 프레임 순서를 무작위로 섞었는데도 정확도가 거의 떨어지지 않았습니다. 가장 적절한 해석은 무엇일까요?</p>
+    <div class="opts" id="q2">
+      <button type="button" data-a="0">모델이 시간을 매우 잘 이해해서 순서가 바뀌어도 흔들리지 않는 것입니다</button>
+      <button type="button" data-a="1">그 답이 시간에서 나오지 않았다는 신호입니다 — 모델이 프레임을 집합으로만 쓰고 있거나, 문항 자체가 한 프레임으로 풀리는 것입니다</button>
+      <button type="button" data-a="0">셔플은 프레임 내용을 바꾸지 않으므로 원래 정확도가 변하지 않는 것이 정상이며, 아무것도 알 수 없습니다</button>
+    </div>
+    <div class="expl" id="e2">정답 라벨을 원본 기준으로 고정한 채 입력 순서를 부쉈으므로, <b>시간을 쓰는 모델이라면 반드시 틀려야 합니다</b>. 떨어지지 않았다면 원인은 둘 중 하나입니다 — 모델이 순서를 안 보거나(프레임 백), 문항이 애초에 순서를 묻지 않거나. 그래서 이 진단은 <b>시간 의존 문항만 골라</b> 돌려야 하고, LAB 13-2에서 전체 문항으로 재면 하락폭이 희석되는 것이 그 이유입니다.</div>
+  </div>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 13-3</div>
+    <p class="q">0.4초짜리 손동작이 "언제, 어느 방향으로" 일어났는지까지 답해야 합니다. 토큰 예산은 지금과 같아야 합니다. 무엇을 바꾸는 것이 맞을까요?</p>
+    <div class="opts" id="q3">
+      <button type="button" data-a="0">프레임 해상도를 올립니다 — 작은 손동작이니 더 잘 보여야 합니다</button>
+      <button type="button" data-a="1">해상도를 낮춰 확보한 예산으로 fps를 올립니다. 그 구간에 시간 그룹이 둘 이상 걸려야 방향을 말할 수 있습니다</button>
+      <button type="button" data-a="0">시간 패치 τ를 키웁니다 — 프레임을 묶으면 움직임이 토큰 안에 담깁니다</button>
+    </div>
+    <div class="expl" id="e3">해상도는 <b>"무엇이 있나"</b>의 손잡이고, fps는 <b>"언제 어떻게 변했나"</b>의 손잡이입니다. 0.4초 구간을 두 개 이상의 시간 그룹으로 나누려면 샘플링 간격이 0.2초보다 촘촘해야 합니다. τ를 키우면 오히려 반대 방향입니다 — 묶인 프레임 사이의 변화가 한 토큰 묶음 안으로 뭉개져 <b>"존재만"</b>으로 내려앉습니다(LAB 13-1의 시간 압축 슬라이더).</div>
+  </div>
+
+  <div class="refs">
+    <h2>더 읽을거리</h2>
+    <ol>
+      <li>Lin et al., <a href="https://arxiv.org/abs/2311.10122">Video-LLaVA</a>, 2023 — 균등 8프레임과 통합 시각 표현.</li>
+      <li>Maaz et al., <a href="https://arxiv.org/abs/2306.05424">Video-ChatGPT</a>, ACL 2024 — 시공간 평균 풀링으로 100프레임을 356토큰까지 줄이는 구성.</li>
+      <li>Wang et al., <a href="https://arxiv.org/abs/2409.12191">Qwen2-VL</a>, 2024 — 2fps 샘플링, 시간 패치 2의 3D 패치, M-RoPE, 비디오 토큰 상한.</li>
+      <li>Bai et al., <a href="https://arxiv.org/abs/2502.13923">Qwen2.5-VL</a>, 2025 — 동적 fps와 시간 인덱스의 절대 시각 정렬, 초 단위 이벤트 지정.</li>
+      <li>Tong et al., <a href="https://arxiv.org/abs/2203.12602">VideoMAE</a>, NeurIPS 2022 — 시간 중복성 때문에 90~95%를 가려도 학습되는 이유. 시공간 큐브의 원류는 Arnab et al., <a href="https://arxiv.org/abs/2103.15691">ViViT</a>, ICCV 2021.</li>
+      <li>Xu et al., <a href="https://arxiv.org/abs/2407.15841">SlowFast-LLaVA</a>, 2024 — 두 스트림으로 해상도와 fps를 동시에 사는 학습 없는 구성. 원조는 Feichtenhofer et al., <a href="https://arxiv.org/abs/1812.03982">SlowFast Networks</a>, ICCV 2019.</li>
+      <li>Song et al., <a href="https://arxiv.org/abs/2307.16449">MovieChat</a>, CVPR 2024 · Zhang et al., <a href="https://arxiv.org/abs/2406.16852">LongVA</a>, 2024 · Li et al., <a href="https://arxiv.org/abs/2311.17043">LLaMA-VID</a>, ECCV 2024 — 긴 비디오를 감당하는 세 갈래(메모리 · 긴 컨텍스트 전이 · 프레임당 2토큰).</li>
+      <li>Lei et al., <a href="https://arxiv.org/abs/2206.03428">Revealing Single Frame Bias for Video-and-Language Learning</a>, ACL 2023 · Buch et al., <a href="https://arxiv.org/abs/2206.01720">Revisiting the "Video" in Video-Language Understanding</a>, CVPR 2022 — 시간 무시 문제의 원 보고.</li>
+      <li>Li et al., <a href="https://arxiv.org/abs/2311.17005">MVBench</a>, CVPR 2024 · Liu et al., <a href="https://arxiv.org/abs/2403.00476">TempCompass</a>, ACL 2024 · Mangalam et al., <a href="https://arxiv.org/abs/2308.09126">EgoSchema</a>, NeurIPS 2023 — 시간을 실제로 묻는 벤치마크 설계.</li>
+      <li>Chen et al., <a href="https://arxiv.org/abs/2406.11816">VideoLLM-online</a>, CVPR 2024 · Zhang et al., <a href="https://arxiv.org/abs/2406.08085">Flash-VStream</a>, 2024 — 스트리밍에서 "언제 말할지"와 "무엇을 기억할지".</li>
+    </ol>
+  </div>
+
+  <div class="next">
+    이전 장 — <a href="12.html">12 소형 VLM의 역습</a><br>
+    다음 장 — <a href="14.html"><b>14 에이전틱 VLM</b></a>: 이 장에서 버린 프레임을 <em>필요할 때 다시 꺼내 볼 수 있다면</em> 어떨까요. 보고, 판단하고, 도구를 부르는 루프로 넘어갑니다.
+  </div>
+
+  <footer>VLM 워크북 · 개인 학습 노트 · 인터랙티브 실습은 전부 브라우저 안에서 돕니다.</footer>
+</main>
+</div>
+
+<script defer src="../assets/js/site.js"></script>
+<script defer src="../assets/js/labs/ch13-sampling.js"></script>
+<script defer src="../assets/js/labs/ch13-shuffle.js"></script>
+</body>
+</html>

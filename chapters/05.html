@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>05 제로샷 검출의 하한선 — VLM 워크북</title>
+<meta name="description" content="학습 없이 프롬프트만으로 검출하면 어디까지 되고 어디서 무너지는가. open-vocabulary 검출기와 생성형 VLM의 구조 차이, 공개 벤치의 격차, 그리고 하한선을 정직하게 재는 평가 프로토콜.">
+<script>try{var t=localStorage.getItem('vlmwb_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="../assets/css/base.css">
+<style>
+  /* 5장 전용 최소 스타일 */
+  .ctl .dim{opacity:.42}
+  .ctl .dim input,.ctl .dim .seg{pointer-events:none}
+  .fig{margin:26px 0;background:var(--panel);border:1px solid var(--line);
+    border-radius:10px;padding:16px;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;min-width:460px;max-width:100%;height:auto}
+  .figcap{color:var(--tx3);font-size:12.5px;margin:10px 0 0;text-align:center}
+  .mono{font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:var(--tx2)}
+  .lab .row + .row{margin-top:20px}
+</style>
+</head>
+<body data-chapter="05">
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+<div class="wrap">
+<nav class="rail" aria-label="목차"></nav>
+
+<main id="main">
+  <div class="eyebrow">CHAPTER 05</div>
+  <h1>제로샷 검출의 하한선</h1>
+  <p class="lede">우리는 검출기를 만드는 법을 압니다 — 모으고, 라벨을 달고, mAP가 오를 때까지 학습합니다. VLM의 제로샷 검출은 그 과정을 <b>통째로 건너뜁니다.</b> 클래스 이름을 문장으로 적어 넣으면 박스가 나옵니다. 그렇다면 질문은 하나뿐입니다 — <b>어디까지 되고, 어디서 무너질까요?</b></p>
+
+  <p>결론을 먼저 적어 둡니다. <strong>제로샷은 대체재가 아니라 하한선(floor)입니다.</strong> "라벨 한 장 없이 오늘 당장 얻을 수 있는 최소치"이지, "학습을 안 해도 되는 이유"가 아닙니다. 이 장은 그 하한선이 실제로 어디에 그어지는지, 그리고 <em>내 도메인에서 그 선을 어떻게 재는지</em>를 다룹니다.</p>
+
+  <div class="note">
+    <b>왜 이 구분이 중요할까요.</b> 하한선을 대체재로 착각하면 두 가지가 동시에 일어납니다. 제로샷이 잘 되는 쉬운 장면만 보고 프로젝트를 시작하고, 어려운 장면에서 무너진 뒤에는 "VLM은 검출에 못 쓴다"고 결론 내립니다. 둘 다 틀렸습니다. 정확한 표현은 <b>"이 난이도까지는 공짜로 되고, 그 위부터는 값을 치러야 한다"</b>입니다. 이 장의 목표는 그 <em>경계 좌표</em>를 손에 쥐는 것입니다.
+  </div>
+
+  <h2>1. 제로샷 검출의 두 계열</h2>
+  <p>"제로샷 검출"이라는 한 단어 아래에 <strong>구조가 전혀 다른 두 계열</strong>이 들어 있습니다. 이 둘을 섞어 놓으면 어떤 대화도 진전되지 않으므로 먼저 갈라 놓겠습니다.</p>
+
+  <h3>1-1. 정렬형 — open-vocabulary 검출기</h3>
+  <p>OWL-ViT · GLIP · Grounding DINO · Detic 계열입니다. 발상은 2장에서 본 CLIP의 zero-shot 분류를 <em>검출기 안으로</em> 옮긴 것입니다. 검출기의 마지막 분류 레이어는 결국 "클래스 개수만큼의 고정된 가중치 벡터"인데, <strong>그 자리에 텍스트 인코더가 만든 임베딩을 꽂습니다.</strong></p>
+  <p>그러면 클래스 목록이 <em>가중치가 아니라 입력</em>이 됩니다. 어제는 <code>"forklift. pallet. safety cone."</code>, 오늘은 <code>"crack. rust. oil stain."</code> — 재학습 없이 목록만 갈아 끼웁니다. 중요한 것은 <strong>박스는 여전히 검출기가 회귀로 뽑는다</strong>는 점입니다. 좌표를 만드는 부분은 우리가 알던 그 검출기 그대로이고, 언어가 된 것은 <em>클래스 쪽뿐</em>입니다.</p>
+  <p>이 구조에서 따라오는 것이 <strong>박스마다 붙는 연속 점수</strong>입니다. NMS도, 임계 조정도, PR 곡선도 평소대로 씁니다.</p>
+
+  <h3>1-2. 생성형 — 좌표를 말하는 VLM</h3>
+  <p>4장에서 본 그 방식입니다. 이미지 토큰과 질문을 넣으면 모델이 <code>person: [12, 40, 88, 210]</code> 같은 <strong>문자열</strong>을 생성합니다. 좌표가 회귀 출력이 아니라 <em>토큰</em>입니다.</p>
+  <p>얻는 것이 분명합니다. 클래스 목록이라는 개념 자체가 필요 없고, "빨간 헬멧을 안 쓴 사람만"처럼 <strong>목록으로 표현할 수 없는 조건</strong>을 그대로 문장으로 넣을 수 있습니다. 잃는 것도 그만큼 분명합니다.</p>
+  <ul>
+    <li><strong>점수가 없습니다.</strong> 생성된 문자열에는 confidence 칸이 없습니다. 임계를 돌릴 손잡이가 사라진다는 뜻이고, 이것이 이 장 LAB의 핵심입니다.</li>
+    <li><strong>출력이 깨질 수 있습니다.</strong> 괄호가 안 닫히고, 좌표가 3개만 나오고, 요청하지 않은 설명 문장이 붙습니다. 검출기에는 없던 <em>파싱 실패</em>라는 실패 유형이 새로 생깁니다.</li>
+    <li><strong>중복 제거가 모델 몫입니다.</strong> NMS를 걸 점수가 없으니, 같은 물체를 두 번 말하지 않는 일까지 언어 모델이 알아서 해야 합니다.</li>
+  </ul>
+
+  <div class="fig">
+    <svg viewBox="0 0 540 244" role="img" aria-label="정렬형 검출기와 생성형 VLM의 구조 비교도">
+      <defs>
+        <marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,1 L9,5 L0,9 z" fill="var(--tx3)"></path>
+        </marker>
+      </defs>
+      <g font-family="'IBM Plex Sans KR', system-ui, sans-serif" font-size="10.5" text-anchor="middle">
+        <text x="6" y="14" text-anchor="start" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="10.5">계열 ① 정렬형 · open-vocabulary 검출기</text>
+        <rect x="6" y="30" width="54" height="32" rx="6" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="33" y="50" fill="var(--tx2)">이미지</text>
+        <line x1="62" y1="46" x2="72" y2="46" stroke="var(--tx3)" marker-end="url(#ah5)"></line>
+        <rect x="76" y="30" width="94" height="32" rx="6" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="123" y="50" fill="var(--tx2)">검출 백본 · 제안</text>
+        <line x1="172" y1="46" x2="182" y2="46" stroke="var(--tx3)" marker-end="url(#ah5)"></line>
+        <rect x="186" y="30" width="104" height="32" rx="6" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="238" y="50" fill="var(--tx2)">영역 · 텍스트 정렬</text>
+        <line x1="292" y1="46" x2="302" y2="46" stroke="var(--tx3)" marker-end="url(#ah5)"></line>
+        <rect x="306" y="30" width="150" height="32" rx="6" fill="var(--panel2)" stroke="var(--vis)"></rect>
+        <text x="381" y="50" fill="var(--vis)">박스 + 연속 점수</text>
+        <rect x="186" y="80" width="104" height="26" rx="6" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="238" y="97" fill="var(--tx2)" font-family="'IBM Plex Mono', monospace" font-size="9.5">"cat. dog. …"</text>
+        <line x1="238" y1="80" x2="238" y2="66" stroke="var(--tx3)" marker-end="url(#ah5)"></line>
+
+        <line x1="6" y1="126" x2="534" y2="126" stroke="var(--line)"></line>
+
+        <text x="6" y="150" text-anchor="start" fill="var(--lang)" font-family="'IBM Plex Mono', monospace" font-size="10.5">계열 ② 생성형 · 좌표를 말하는 VLM</text>
+        <rect x="6" y="166" width="54" height="32" rx="6" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="33" y="186" fill="var(--tx2)">이미지</text>
+        <line x1="62" y1="182" x2="72" y2="182" stroke="var(--tx3)" marker-end="url(#ah5)"></line>
+        <rect x="76" y="166" width="84" height="32" rx="6" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="118" y="186" fill="var(--tx2)">비전 인코더</text>
+        <line x1="162" y1="182" x2="172" y2="182" stroke="var(--tx3)" marker-end="url(#ah5)"></line>
+        <rect x="176" y="166" width="68" height="32" rx="6" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="210" y="186" fill="var(--tx2)">프로젝터</text>
+        <line x1="246" y1="182" x2="256" y2="182" stroke="var(--tx3)" marker-end="url(#ah5)"></line>
+        <rect x="260" y="166" width="54" height="32" rx="6" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="287" y="186" fill="var(--tx2)">LLM</text>
+        <line x1="316" y1="182" x2="326" y2="182" stroke="var(--tx3)" marker-end="url(#ah5)"></line>
+        <rect x="330" y="166" width="204" height="32" rx="6" fill="var(--panel2)" stroke="var(--lang)"></rect>
+        <text x="432" y="186" fill="var(--lang)" font-family="'IBM Plex Mono', monospace" font-size="9.5">"person: [12, 40, 88, 210]"</text>
+        <rect x="260" y="216" width="54" height="24" rx="6" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="287" y="232" fill="var(--tx2)" font-size="9.5">프롬프트</text>
+        <line x1="287" y1="216" x2="287" y2="202" stroke="var(--tx3)" marker-end="url(#ah5)"></line>
+      </g>
+    </svg>
+    <p class="figcap">클래스 목록이 <b>입력</b>이 된 검출기(위)와, 좌표까지 <b>생성</b>해 버리는 언어 모델(아래). 구조가 다르면 무너지는 방식도 다릅니다.</p>
+  </div>
+
+  <div class="note">
+    <b>검출 엔지니어를 위한 한 줄.</b> 정렬형은 <code>분류 헤드의 가중치를 텍스트 임베딩으로 바꾼 검출기</code>이고, 생성형은 <code>검출을 텍스트 생성 문제로 다시 쓴 것</code>입니다. 앞의 것은 파이프라인에 그대로 꽂히고, 뒤의 것은 파이프라인 자체를 다시 설계하게 만듭니다.
+  </div>
+
+  <h2>2. 공개 벤치에서의 격차</h2>
+  <p>숫자를 먼저 보겠습니다. 전부 공개 논문에 실린 값이고, 출처를 함께 적었습니다.</p>
+
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>모델 · 조건</th><th>벤치</th><th>지표</th><th>출처</th></tr></thead>
+    <tbody>
+      <tr><td>GLIP-L · 제로샷</td><td>COCO</td><td class="num">49.8 AP</td><td>arXiv:2112.03857</td></tr>
+      <tr><td>GLIP-L · COCO로 파인튜닝</td><td>COCO val / test-dev</td><td class="num">60.8 / 61.5 AP</td><td>같은 논문</td></tr>
+      <tr><td>GLIP-L · 제로샷</td><td>LVIS</td><td class="num">26.9 AP</td><td>같은 논문</td></tr>
+      <tr><td>Grounding DINO · 제로샷</td><td>COCO</td><td class="num">52.5 AP</td><td>arXiv:2303.05499</td></tr>
+      <tr><td>Grounding DINO · 제로샷</td><td>ODinW-35</td><td class="num">26.1 AP</td><td>같은 논문</td></tr>
+      <tr><td>OWL-ST · 희귀 클래스</td><td>LVIS rare</td><td class="num">31.2 → 44.6 AP<sub>r</sub></td><td>arXiv:2306.09683</td></tr>
+      <tr><td>Detic · 신규 클래스 이득</td><td>open-vocab LVIS</td><td class="num">+8.3 mAP</td><td>arXiv:2201.02605</td></tr>
+      <tr><td>Griffon(생성형 · 13B)</td><td>COCO val2017</td><td class="num">24.8 mAP</td><td>arXiv:2311.14552</td></tr>
+      <tr><td>Griffon v2(생성형 · 고해상도)</td><td>COCO val2017</td><td class="num">38.5 mAP</td><td>arXiv:2403.09333</td></tr>
+      <tr><td>Co-DETR(지도학습)</td><td>COCO test-dev</td><td class="num">66.0 AP</td><td>arXiv:2211.12860</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>여기서 읽어야 할 것은 순위표가 아니라 <strong>세 개의 간격</strong>입니다.</p>
+  <ol>
+    <li><strong>제로샷 52.5 ↔ 지도학습 66.0.</strong> COCO처럼 <em>흔한 80개 클래스</em>에서도 13 AP가 남습니다. 그리고 COCO는 제로샷에 가장 유리한 판입니다 — 클래스 이름이 전부 웹 캡션에 흔하게 등장하는 단어들이니까요.</li>
+    <li><strong>COCO 52.5 ↔ ODinW-35 26.1.</strong> 같은 모델, 같은 프롬프트 방식인데 절반으로 떨어집니다. ODinW는 항공 사진·수중 영상·현미경·게임 화면 같은 <em>35개의 실제 도메인</em>을 모아 놓은 벤치입니다. <strong>내 도메인과 가장 비슷한 숫자는 52.5가 아니라 26.1 쪽입니다.</strong></li>
+    <li><strong>정렬형 52.5 ↔ 생성형 24.8.</strong> 그런데 이 비교에는 단서가 붙습니다. Griffon은 제로샷이 아니라 <em>검출 데이터로 학습한</em> 생성형 모델입니다. 즉 학습을 했는데도 초기 세대는 24.8에 머물렀고, 해상도를 크게 올린 v2에 와서야 38.5로 Faster R-CNN급(37.9)에 닿았습니다. <strong>좌표를 텍스트로 뱉는 방식 자체에 비용이 있다</strong>는 뜻입니다.</li>
+  </ol>
+  <p>동시에 반대 방향의 사실도 정직하게 적어야 합니다. 이 선은 <em>움직이고 있습니다</em>. 사람이 단 박스를 한 장도 못 본 LVIS 희귀 클래스에서 AP<sub>r</sub>이 31.2에서 44.6으로 올라간 것처럼, 자기학습과 데이터 확장만으로도 하한선은 계속 올라갑니다. 그러니 이 장의 숫자는 <strong>2026년 시점의 스냅숏</strong>으로 읽고, 방법 쪽을 가져가시면 됩니다.</p>
+
+  <h2>3. 어디서 무너지는가</h2>
+  <p>평균 AP 하나로는 아무것도 못 고칩니다. 무너지는 자리는 다섯 군데이고, 각각 원인이 다릅니다.</p>
+
+  <h3>3-1. 작은 물체 — 오차는 절대량, IoU는 상대량</h3>
+  <p>이것이 가장 기계적이고 가장 잔인한 실패입니다. 제로샷 검출기의 좌표 오차는 대체로 <strong>이미지 크기에 대해 일정한 절대량</strong>으로 발생합니다. 그런데 IoU는 <em>박스 크기에 대한 비율</em>로 계산됩니다.</p>
+  <p>가로폭의 2%만큼 박스가 밀렸다고 해봅시다. 폭이 이미지의 40%인 물체라면 IoU는 0.9대에서 거의 꿈쩍하지 않습니다. 폭이 5%인 물체라면 <strong>같은 2%가 IoU를 0.4 아래로 끌어내립니다.</strong> 검출 성능이 떨어진 것이 아니라, <em>같은 품질의 좌표가 다른 점수를 받는 것</em>입니다.</p>
+  <p>생성형에서는 여기에 한 가지가 더 얹힙니다. 좌표를 정수 토큰으로 뱉으면 격자 해상도(예: 0~999 또는 0~1000의 빈)가 곧 좌표 정밀도의 상한이 됩니다. 작은 물체에서는 그 양자화 오차만으로도 IoU가 흔들립니다.</p>
+
+  <h3>3-2. 밀집 — 하나로 뭉치거나, 둘로 늘어나거나</h3>
+  <p>물체가 서로 겹쳐 있으면 두 방향으로 실패합니다. 인접한 개체를 <strong>하나로 병합</strong>하거나(재현율 손실), 같은 개체를 <strong>두 번</strong> 말합니다(정밀도 손실). 정렬형에는 NMS가 있어 후자를 어느 정도 정리하지만, 점수가 없는 생성형에는 그 안전망이 없습니다.</p>
+
+  <h3>3-3. 도메인 특수 클래스 — 이름을 아는 것 ≠ 본 적이 있는 것</h3>
+  <p>제로샷의 가장 흔한 오해가 여기 있습니다. 텍스트 인코더가 <code>"anodized aluminum bracket"</code>이라는 <em>단어</em>를 이해한다고 해서, 비전 쪽이 그 물체를 <em>본 적</em>이 있는 것은 아닙니다. 정렬은 웹 이미지-캡션 분포 위에서 학습되었고, 그 분포에 없던 시각 개념은 <strong>가리킬 좌표 자체가 없습니다.</strong> ODinW-35에서 절반으로 떨어지는 숫자가 정확히 이 현상입니다.</p>
+
+  <h3>3-4. 개수 세기</h3>
+  <p>CLIP 논문이 이미 자기 한계로 적어 둔 항목입니다 — 개수 세기 같은 추상적·체계적 과제에 약합니다. 최근 생성형 VLM도 사정이 크게 다르지 않아서, 도형 몇 개를 세거나 겹침을 판정하는 <em>저수준 시각 과제</em>만 모아 놓은 평가에서 최신 모델 네 종의 평균이 58.07%, 가장 좋은 모델도 77.84%에 그쳤습니다(사람은 사실상 100%). 검출에서 "몇 개인가"는 곧 재현율이므로, 이 약점은 그대로 재현율 손실로 나타납니다.</p>
+
+  <h3>3-5. 유사 클래스 구분과 "없음"</h3>
+  <p>2장에서 본 argmax 문제가 검출에서 되살아납니다. 후보 클래스 목록을 주면 모델은 <strong>그중 하나를 반드시 고르려는 경향</strong>을 보입니다. <code>"screw"</code>와 <code>"bolt"</code>를 함께 넣으면 경계가 무너지고, 아무것도 없는 이미지에 "없음"이라고 답하는 능력은 애초에 잘 학습되어 있지 않습니다. 웹 캡션에 <em>부재</em>를 기술하는 문장이 거의 없기 때문입니다. 생성형 VLM이 이미지에 없는 물체를 태연히 언급하는 현상은 별도의 벤치로 측정될 만큼 체계적입니다.</p>
+
+  <div class="lab">
+    <div class="lab-tag">LAB 5-1 · 하한선을 직접 재보기</div>
+    <h3>제로샷 하한선 측정 시뮬레이터</h3>
+    <p class="hint">장면 <b>12장</b>짜리 소량 GT 세트에 가상 검출기를 돌려 IoU 매칭·정밀도·재현율·AP를 계산합니다. 난이도를 <b>작고 밀집</b>으로 옮기면서 <b>AP50과 AP75의 간격</b>을, 검출기를 <b>생성형</b>으로 바꾸면서 <b>PR 곡선의 모양</b>을 보세요.</p>
+    <div class="row">
+      <div>
+        <canvas id="z_scene" aria-label="합성 장면에 정답 박스와 예측 박스를 겹쳐 그린 그림"></canvas>
+        <div class="legend">
+          <span><i style="background:var(--lang)"></i>정답(GT)</span>
+          <span><i style="background:var(--ok)"></i>맞춘 예측</span>
+          <span><i style="background:var(--bad)"></i>헛것 · 놓침(✕)</span>
+        </div>
+        <div class="btns" style="margin-top:10px">
+          <button class="btn" id="z_prev" type="button" aria-label="이전 장면">◀</button>
+          <span class="mono" style="align-self:center">장면 <b id="z_scenev">1 / 12</b></span>
+          <button class="btn" id="z_next" type="button" aria-label="다음 장면">▶</button>
+          <button class="btn" id="z_reroll" type="button">↺ 새 세트</button>
+        </div>
+      </div>
+      <div class="ctl">
+        <div>
+          <label>장면 난이도</label>
+          <div class="seg" id="z_tier">
+            <button type="button" data-t="easy">큰 단일</button>
+            <button type="button" data-t="mid" class="sel">다중 중간</button>
+            <button type="button" data-t="hard">작고 밀집</button>
+          </div>
+        </div>
+        <div>
+          <label>가상 검출기</label>
+          <div class="seg" id="z_det">
+            <button type="button" data-d="ov" class="sel">정렬형</button>
+            <button type="button" data-d="gen">생성형</button>
+            <button type="button" data-d="gensc">자기평가</button>
+          </div>
+          <div style="font-size:11.5px;color:var(--tx3);margin-top:6px;line-height:1.6">
+            정렬형 = 연속 점수 · 생성형 = 점수 없음 · 자기평가 = 생성형에 1~5점을 매기게 한 경우
+          </div>
+        </div>
+        <div><label for="z_noise">좌표 노이즈 <b id="z_noisev">±1.6% 폭</b></label>
+          <input type="range" id="z_noise" min="0" max="100" step="5" value="25"></div>
+        <div><label for="z_miss">누락률 <b id="z_missv">20%</b></label>
+          <input type="range" id="z_miss" min="0" max="60" step="5" value="20"></div>
+        <div><label for="z_hallu">환각률 <b id="z_halluv">15%</b></label>
+          <input type="range" id="z_hallu" min="0" max="60" step="5" value="15"></div>
+        <div id="z_parsewrap" class="dim"><label for="z_parse">파싱 실패율 <b id="z_parsev">10%</b></label>
+          <input type="range" id="z_parse" min="0" max="50" step="5" value="10" disabled></div>
+        <div id="z_policywrap" class="dim">
+          <label>파싱 실패 처리</label>
+          <div class="seg" id="z_policy">
+            <button type="button" data-p="zero" class="sel" disabled>미검출로 계산</button>
+            <button type="button" data-p="drop" disabled>평가에서 제외</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label style="font-size:13px;color:var(--tx2);display:block;margin-bottom:6px">PR 곡선
+          <span style="color:var(--tx3)">(IoU 0.5 · 12장 전체)</span></label>
+        <canvas id="z_pr" aria-label="정밀도-재현율 곡선"></canvas>
+      </div>
+      <div class="ctl">
+        <div class="stat">
+          정답 GT <span id="z_ngt">0</span>개 · 예측 <span id="z_npred">0</span>개<br>
+          TP <span class="good" id="z_tp">0</span> · FP <span class="warn" id="z_fp">0</span> · FN <span id="z_fn">0</span><br>
+          정밀도 <span id="z_prec">0%</span> · 재현율 <span id="z_rec">0%</span><br>
+          AP50 <b id="z_ap50">0.000</b><br>
+          AP75 <span id="z_ap75">0.000</span><br>
+          파싱 실패 <span id="z_fail">해당 없음</span><br>
+          돌릴 수 있는 임계 <span id="z_ops">0개</span>
+        </div>
+      </div>
+    </div>
+    <p class="hint" style="margin:16px 0 0" id="z_verdict"></p>
+    <p class="hint" style="margin:8px 0 0;color:var(--tx3)">전부 브라우저 안에서 도는 합성 시뮬레이션입니다 — 실제 모델을 부르지 않습니다. 좌표 노이즈는 <b>화면 가로폭 대비 절대량</b>으로 들어가고, 밀집도가 높은 박스는 누락 확률이 조금 더 붙습니다. 그리고 정렬형의 점수는 실제 IoU와 상관되도록 만들어 두었습니다 — 즉 <b>현실보다 후하게 잘 보정된</b> 검출기입니다. 그런데도 곡선이 이 모양이라는 점이 요지입니다.</p>
+  </div>
+
+  <p>세 가지가 손에 남았을 것입니다.</p>
+  <ul>
+    <li><strong>같은 슬라이더, 다른 결과.</strong> 노이즈·누락·환각을 하나도 건드리지 않고 난이도만 <b>작고 밀집</b>으로 옮기면 AP가 주저앉습니다. 검출기가 나빠진 것이 아니라 <em>장면이 그 오차를 더 이상 용서하지 않는 것</em>입니다. 그리고 AP75는 훨씬 먼저 무너집니다 — 큰 물체에서는 AP50과 거의 붙어 있던 두 값이 작은 물체에서는 열 배 넘게 벌어집니다.</li>
+    <li><strong>생성형의 PR 곡선은 점 하나입니다.</strong> "돌릴 수 있는 임계" 칸을 보세요. 정렬형은 수십 개, 자기평가는 다섯 개, 생성형은 <b>1개</b>입니다.</li>
+    <li><strong>파싱 실패 처리 방식이 점수를 바꿉니다.</strong> 같은 모델·같은 프롬프트인데 "제외"와 "미검출로 계산" 사이에서 AP가 눈에 띄게 움직입니다.</li>
+  </ul>
+
+  <h2>4. 프롬프트 민감도 — 같은 뜻, 다른 결과</h2>
+  <p>학습을 하지 않는 대신, 우리에게 남은 유일한 손잡이는 <strong>클래스를 어떻게 적느냐</strong>입니다. 그런데 이 손잡이는 생각보다 헐겁습니다.</p>
+  <p>CLIP 논문에서 이미 프롬프트 표현과 앙상블만으로 ImageNet 정확도가 5%p 가까이 움직였습니다. 검출로 오면 변수가 더 늘어납니다. 클래스명을 맨 명사로 넣을지 템플릿으로 감쌀지, 동의어를 함께 나열할지(<code>"human. person. pedestrian."</code>), 수식 구를 붙일지 — 전부 결과를 바꿉니다.</p>
+  <p>최근 연구는 이 흔들림이 <em>무작위가 아니라 구조적</em>이라고 보고합니다. 의미가 겹치는 표현 여섯 개로 같은 장면을 가리키게 했을 때 <strong>평균 2.11개의 서로 다른 인스턴스</strong>가 선택되었고, 텍스트 임베딩 사이의 거리로 설명되는 불일치는 <strong>34%뿐</strong>이었습니다(r = −0.58). 나머지는 "후보 중 하나를 고른다"는 선택 메커니즘 자체에서 나옵니다. 프롬프트 앙상블도 만능이 아니어서, 오히려 선택을 뭉뚱그린 영역 쪽으로 밀어버리는 경우가 관찰되었습니다.</p>
+  <p>여기에 한 가지가 더 있습니다. <strong>부정 표현</strong>입니다. "없으면 없다고 답하라"를 프롬프트에 명시하는 것만으로 생성형의 헛것이 줄어드는 경우가 많습니다. 3-5절에서 본 대로 모델이 <em>부재</em>를 표현하는 훈련을 거의 받지 않았기 때문에, 그 선택지가 있다는 사실을 명시적으로 알려 주어야 합니다.</p>
+
+  <div class="lab">
+    <div class="lab-tag">LAB 5-2 · 표현만 바꿔 보기</div>
+    <h3>프롬프트 민감도 미니</h3>
+    <p class="hint">같은 장면, 같은 대상. 클래스를 적는 <b>표현 5종</b>만 바꿉니다. 회색 세로선은 장면 6개 전체의 평균입니다. <b>장면을 넘겨 보세요 — 1등이 바뀝니다.</b></p>
+    <div class="row">
+      <div id="p_bars" style="flex:2 1 280px;min-width:260px"></div>
+      <div class="ctl" style="flex:1 1 170px;min-width:170px">
+        <div class="stat">
+          장면 <b id="p_scenev">1 / 6</b><br>
+          최고 − 최저 <span class="warn" id="p_spread">0%p</span><br>
+          이 장면 1등<br><span id="p_best" style="font-size:11px">—</span>
+        </div>
+        <div class="btns"><button class="btn primary" id="p_next" type="button">▶ 다른 장면</button></div>
+      </div>
+    </div>
+    <p class="hint" style="margin:16px 0 0"><b>개념 시뮬레이션입니다 — 여기 숫자는 실측이 아닙니다.</b> "표현을 바꾸면 검출률이 흔들리고, 장면이 바뀌면 순위까지 뒤집힌다"는 구조만 재현했습니다. 실무의 교훈은 정확히 그 구조입니다 — <b>보편적으로 좋은 표현은 없고, 내 데이터에서 재보는 수밖에 없습니다.</b> 그리고 표현 하나를 장면 한 장에서 골랐다면, 그것은 고른 것이 아니라 과적합시킨 것입니다.</p>
+  </div>
+
+  <h2>5. 하한선을 재는 프로토콜</h2>
+  <p>이제 실제로 재는 방법입니다. 목표는 논문용 숫자가 아니라 <strong>의사결정용 숫자</strong>입니다 — "이걸로 갈 수 있나, 없나".</p>
+
+  <h3>5-1. GT는 얼마나 필요한가</h3>
+  <p>생각보다 적습니다. 하한선 측정의 목적은 소수점 셋째 자리가 아니라 <em>판정</em>이므로, 대개 <strong>100~300장</strong>이면 충분합니다. 대신 조건이 세 개 붙습니다.</p>
+  <ul>
+    <li><strong>난이도별로 층을 나눠 뽑습니다.</strong> 쉬운 장면만 모으면 하한선이 아니라 상한선을 재게 됩니다. LAB 5-1의 세 난이도가 정확히 그 층입니다.</li>
+    <li><strong>클래스마다 최소 인스턴스 수를 보장합니다.</strong> 인스턴스가 다섯 개인 클래스의 AP는 아무것도 말해 주지 않습니다.</li>
+    <li><strong>물체가 하나도 없는 이미지를 반드시 섞습니다.</strong> 3-5절의 "없음" 문제는 음성 이미지가 없으면 절대 드러나지 않습니다.</li>
+  </ul>
+
+  <h3>5-2. 파싱 실패는 실패입니다</h3>
+  <p>생성형을 평가할 때 가장 흔한 반칙이 여기 있습니다. 출력이 깨진 이미지를 조용히 건너뛰고 나머지로 AP를 계산하는 것입니다. 그러면 <strong>모델이 어려워서 헛소리를 한 이미지가 정확히 평가에서 빠집니다.</strong> 실패가 무작위로 일어나지 않는다는 점이 핵심입니다 — 어려운 장면일수록 출력이 깨집니다.</p>
+  <p>운영 관점의 답은 단순합니다. <strong>파싱 실패 = 검출 0건</strong>입니다. 사용자에게는 실패한 요청이니까요. 재시도 정책을 쓸 계획이라면 그 재시도까지 포함한 파이프라인 전체를 평가하고, <em>파싱 실패율은 AP와 별도의 지표로 항상 함께 보고</em>합니다.</p>
+
+  <h3>5-3. 점수가 없을 때 무엇을 하는가</h3>
+  <p>LAB 5-1에서 본 그 문제입니다. 점수가 없으면 PR 곡선이 점 하나가 되고, AP는 사실상 <em>정밀도 × 재현율</em>이라는 관례적 대체값이 됩니다. 선택지는 셋입니다.</p>
+  <ol>
+    <li><strong>그냥 인정하기.</strong> AP를 버리고 <strong>단일 운영점의 정밀도·재현율·F1</strong>만 보고합니다. 임계를 못 돌리는 시스템에 곡선을 그리는 것이 더 정직하지 않습니다.</li>
+    <li><strong>자기평가 점수.</strong> 박스마다 확신도를 1~5로 함께 말하게 합니다. LAB에서 본 대로 계단 다섯 칸이 생기고, 정렬형만큼은 아니어도 <em>임계라는 손잡이가 되살아납니다</em>. 다만 언어 모델의 자기 점수는 보정이 잘 되어 있지 않고 대체로 후한 쪽으로 치우칩니다.</li>
+    <li><strong>샘플링 일관성.</strong> 같은 이미지에 같은 질문을 온도를 준 채 <em>k번</em> 물어, 어떤 박스가 몇 번 등장했는지를 세어 점수로 씁니다. k배 비싸지만 자기 점수보다 대체로 잘 정렬됩니다.</li>
+  </ol>
+  <p>네 번째 길이 하나 더 있습니다 — 생성된 토큰의 <strong>로그확률</strong>을 그대로 읽어 점수로 쓰는 방법입니다. 모델 내부에 접근할 수 있을 때만 가능하고, 별도의 장을 쓸 만한 주제라 9장에서 따로 다룹니다.</p>
+
+  <h3>5-4. 보고할 숫자 묶음</h3>
+  <p>제로샷 하한선 보고서에는 항상 이 여섯 개를 함께 적습니다. 하나라도 빠지면 다음 회의에서 반드시 그 항목이 문제가 됩니다.</p>
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>항목</th><th>왜 필요한가</th></tr></thead>
+    <tbody>
+      <tr><td>AP50 · AP75</td><td>두 값의 간격이 곧 <b>좌표 품질</b>입니다. AP50만 높으면 "대충 그 근처"라는 뜻입니다.</td></tr>
+      <tr><td>운영점의 정밀도 · 재현율</td><td>실제로 배포되는 지점의 숫자. 점수 없는 모델에는 이것만 존재합니다.</td></tr>
+      <tr><td>난이도 층별 분해</td><td>평균 AP는 어디를 고쳐야 하는지 알려 주지 않습니다.</td></tr>
+      <tr><td>파싱 실패율</td><td>AP에 섞이면 안 되는, 완전히 다른 종류의 실패입니다.</td></tr>
+      <tr><td>프롬프트 폭(최고 − 최저)</td><td>이 폭보다 작은 성능 차이는 <b>노이즈</b>입니다. 모델 비교의 유효숫자를 정해 줍니다.</td></tr>
+      <tr><td>음성 이미지 오검출률</td><td>"없음"을 말할 수 있는지. 배포 후 가장 먼저 터지는 항목입니다.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>5-5. 흔한 반칙 네 가지</h3>
+  <ul>
+    <li><strong>쉬운 장면만 모아 놓고 하한선이라 부르기.</strong> 층화 추출로 막습니다.</li>
+    <li><strong>같은 평가셋에서 프롬프트를 스무 번 고쳐 최고치 보고하기.</strong> 그건 제로샷이 아니라 평가셋에 대한 튜닝입니다. 프롬프트 선택용 세트와 보고용 세트를 나눕니다.</li>
+    <li><strong>파싱 실패 이미지 제외.</strong> 5-2절.</li>
+    <li><strong>클래스명을 GT 라벨 문자열 그대로 쓰기.</strong> 운영에서 그 문자열을 그대로 쓸 것이 아니라면, 라벨 이름은 이미 답을 알고 고른 표현입니다.</li>
+  </ul>
+
+  <h2>6. 그래서 언제 쓰는가</h2>
+  <p>하한선을 재고 나면 판단은 오히려 쉬워집니다.</p>
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>상황</th><th>판단</th></tr></thead>
+    <tbody>
+      <tr><td>클래스 목록이 자주 바뀌거나 아직 미정</td><td><b>제로샷</b> — 재학습 없이 목록만 갈아 끼우는 것이 이 계열의 존재 이유입니다.</td></tr>
+      <tr><td>라벨 0장, 다음 주에 데모</td><td><b>제로샷</b> — 하한선이 요구치를 넘는지만 확인하면 됩니다.</td></tr>
+      <tr><td>라벨링 시작점을 모를 때</td><td><b>제로샷을 라벨링 도구로</b> — 의사라벨을 만들어 사람이 고치게 하면 처음부터 그리는 것보다 훨씬 빠릅니다.</td></tr>
+      <tr><td>롱테일 클래스 수백 개</td><td><b>제로샷 우선</b> — 인스턴스가 몇 개뿐인 클래스는 학습으로도 잘 안 됩니다.</td></tr>
+      <tr><td>작거나 빽빽한 대상</td><td><b>파인튜닝</b> — 3-1·3-2절의 실패는 프롬프트로 고쳐지지 않습니다.</td></tr>
+      <tr><td>허용 오검출률이 숫자로 정해진 경우</td><td><b>파인튜닝</b> — 점수 없는 모델에는 맞출 임계 자체가 없습니다.</td></tr>
+      <tr><td>도메인 특수 클래스, 웹에 사진 없음</td><td><b>파인튜닝</b> — 3-3절. 정렬 자체가 존재하지 않습니다.</td></tr>
+      <tr><td>지연·비용 예산이 빡빡한 경우</td><td><b>파인튜닝된 작은 검출기</b> — 큰 VLM을 프레임마다 부르는 비용은 11장에서 다룹니다.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>실무에서 가장 자주 이기는 것은 사실 <strong>둘 사이의 길</strong>입니다. 제로샷으로 의사라벨을 만들고 → 사람이 소량만 검수·수정하고 → 그 데이터로 파인튜닝합니다. 이때 제로샷은 최종 모델이 아니라 <em>데이터 부트스트랩 장치</em>로 쓰이고, 이 장에서 잰 하한선은 "그 부트스트랩이 사람의 시간을 실제로 아껴 주는가"를 판정하는 근거가 됩니다.</p>
+  <p><strong>한 줄 정리</strong> — 제로샷은 라벨 0장에서 시작하는 바닥이고, 그 바닥의 높이는 <em>내 도메인에서 직접 재야만</em> 알 수 있습니다. 재보고 모자라면, 다음 질문은 "얼마나 적은 라벨과 얼마나 적은 파라미터로 그 간격을 메울 수 있는가"가 됩니다.</p>
+
+  <h2>7. 확인 문제</h2>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 5-1</div>
+    <p class="q">좌표를 문장으로 생성하는 VLM에 confidence가 없다는 사실은 평가에 어떤 결과를 낳을까요?</p>
+    <div class="opts" id="q1">
+      <button type="button" data-a="0">점수가 없을 뿐이므로 AP는 정상적으로 계산되고, 정렬형과 그대로 비교할 수 있습니다</button>
+      <button type="button" data-a="1">임계를 돌릴 수 없어 운영점이 하나로 고정되고, PR 곡선은 점 하나가 됩니다 — AP는 사실상 정밀도 × 재현율의 대체값이 됩니다</button>
+      <button type="button" data-a="0">모든 예측을 confidence 1.0으로 두면 정밀도와 재현율이 항상 1이 됩니다</button>
+    </div>
+    <div class="expl" id="e1">PR 곡선은 <b>서로 다른 점수 값마다</b> 점이 하나씩 찍힙니다. 점수가 전부 같으면 점은 하나뿐이고, 정밀도와 재현율을 맞바꿀 손잡이가 없습니다. 이 상태에서 계산한 AP를 연속 점수를 가진 검출기의 AP와 나란히 놓는 것이 이 장에서 가장 흔한 오독입니다. 자기평가 점수나 샘플링 일관성은 이 손잡이를 <b>거칠게라도</b> 되살리려는 시도입니다.</div>
+  </div>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 5-2</div>
+    <p class="q">같은 모델·같은 프롬프트인데 작은 물체 장면에서만 AP가 무너집니다. 가장 직접적인 원인은 무엇일까요?</p>
+    <div class="opts" id="q2">
+      <button type="button" data-a="0">텍스트 인코더가 작은 물체의 클래스 이름을 이해하지 못하기 때문입니다</button>
+      <button type="button" data-a="1">좌표 오차는 대체로 절대량으로 발생하는데 IoU는 박스 크기 대비 비율이라, 같은 오차가 작은 박스에서만 IoU를 무너뜨리기 때문입니다</button>
+      <button type="button" data-a="0">작은 물체는 GT 박스 개수가 많아 재현율의 분모가 커지기 때문입니다</button>
+    </div>
+    <div class="expl" id="e2">클래스 이름은 물체 크기와 아무 상관이 없습니다. 문제는 지표의 기하학입니다 — 가로폭의 2%만큼 밀린 박스는 폭 40%짜리 물체에서는 IoU가 거의 그대로지만, 폭 5%짜리 물체에서는 <b>IoU가 0.4 아래로 떨어집니다</b>. 그래서 AP75가 AP50보다 훨씬 먼저 무너지고, 해상도를 올리거나(3장) 파인튜닝으로 좌표 정밀도를 직접 올리는 것이 답이 됩니다.</div>
+  </div>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 5-3</div>
+    <p class="q">생성형 VLM의 출력이 300장 중 24장에서 파싱에 실패했습니다. 어떻게 처리해야 할까요?</p>
+    <div class="opts" id="q3">
+      <button type="button" data-a="0">파싱 실패는 모델 성능과 무관한 형식 문제이므로 24장을 제외하고 276장으로 AP를 계산합니다</button>
+      <button type="button" data-a="1">검출 0건으로 계산해 AP에 반영하고, 파싱 실패율은 별도 지표로 함께 보고합니다</button>
+      <button type="button" data-a="0">출력이 파싱될 때까지 재시도한 뒤, 재시도 횟수는 보고하지 않고 최종 결과만 씁니다</button>
+    </div>
+    <div class="expl" id="e3">파싱 실패는 <b>무작위로 일어나지 않습니다</b> — 어려운 장면일수록 출력이 깨집니다. 그 24장을 빼면 모델이 가장 헤맨 이미지가 정확히 평가에서 사라지고 하한선이 부풀려집니다. 사용자 입장에서 그것은 실패한 요청이므로 검출 0건입니다. 재시도 정책을 쓸 것이라면 재시도까지 포함한 파이프라인 전체를 평가하고, 비용도 함께 적습니다.</div>
+  </div>
+
+  <div class="refs">
+    <h2>더 읽을거리</h2>
+    <ol>
+      <li>Minderer et al., <a href="https://arxiv.org/abs/2205.06230">Simple Open-Vocabulary Object Detection with Vision Transformers (OWL-ViT)</a>, ECCV 2022 — 검출기 헤드에 텍스트 임베딩을 꽂는 가장 단순한 형태.</li>
+      <li>Minderer et al., <a href="https://arxiv.org/abs/2306.09683">Scaling Open-Vocabulary Object Detection (OWLv2)</a>, NeurIPS 2023 — 자기학습으로 LVIS 희귀 클래스 AP<sub>r</sub>을 31.2 → 44.6으로.</li>
+      <li>Li et al., <a href="https://arxiv.org/abs/2112.03857">Grounded Language-Image Pre-training (GLIP)</a>, CVPR 2022 — 검출과 구절 그라운딩을 하나로. COCO 제로샷 49.8 AP, 파인튜닝 후 60.8 AP.</li>
+      <li>Liu et al., <a href="https://arxiv.org/abs/2303.05499">Grounding DINO</a>, ECCV 2024 — COCO 제로샷 52.5 AP, ODinW-35 제로샷 26.1 AP. 두 숫자의 간격이 이 장의 주제입니다.</li>
+      <li>Zhou et al., <a href="https://arxiv.org/abs/2201.02605">Detecting Twenty-thousand Classes using Image-level Supervision (Detic)</a>, ECCV 2022 — 이미지 라벨만으로 어휘를 넓히기.</li>
+      <li>Gupta et al., <a href="https://arxiv.org/abs/1908.03195">LVIS: A Dataset for Large Vocabulary Instance Segmentation</a>, CVPR 2019 — 롱테일 평가가 왜 다른 이야기인지.</li>
+      <li>Zhan et al., <a href="https://arxiv.org/abs/2311.14552">Griffon</a>, ECCV 2024 · <a href="https://arxiv.org/abs/2403.09333">Griffon v2</a>, 2024 — 좌표를 문장으로 뱉는 계열의 COCO 성적(24.8 → 38.5 mAP).</li>
+      <li>Zong et al., <a href="https://arxiv.org/abs/2211.12860">DETRs with Collaborative Hybrid Assignments Training (Co-DETR)</a>, ICCV 2023 — 비교 기준이 되는 지도학습 상단(COCO test-dev 66.0 AP).</li>
+      <li>Rahmanzadehgervi et al., <a href="https://arxiv.org/abs/2407.06581">Vision Language Models are Blind</a>, ACCV 2024 — 저수준 시각 과제 평균 58.07%, 최고 77.84%.</li>
+      <li>Li et al., <a href="https://arxiv.org/abs/2305.10355">Evaluating Object Hallucination in Large Vision-Language Models (POPE)</a>, EMNLP 2023 — 없는 물체를 말하는 현상을 재는 법.</li>
+      <li>Deka et al., <a href="https://arxiv.org/abs/2604.17126">Prompt Sensitivity in Vision-Language Grounding</a>, 2026 — 의미가 겹치는 표현 6종에 평균 2.11개의 서로 다른 선택, 텍스트 임베딩 거리로는 34%만 설명(r = −0.58).</li>
+    </ol>
+  </div>
+
+  <div class="next">
+    이전 장 — <a href="04.html">04 그라운딩 — 좌표를 말하게 하기</a><br>
+    다음 장 — <a href="06.html"><b>06 LoRA — 큰 모델을 얇게 고치기</b></a>: 하한선을 재봤더니 모자랐습니다. 그렇다면 얼마나 적은 라벨과 얼마나 적은 파라미터로 그 간격을 메울 수 있을까요.
+  </div>
+
+  <footer>VLM 워크북 · 개인 학습 노트 · 인터랙티브 실습은 전부 브라우저 안에서 돕니다.</footer>
+</main>
+</div>
+
+<script defer src="../assets/js/site.js"></script>
+<script defer src="../assets/js/labs/ch05-zeroshot.js"></script>
+</body>
+</html>

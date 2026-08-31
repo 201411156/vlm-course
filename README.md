@@ -4,9 +4,24 @@
 14장짜리 공개 학습 노트. 모든 실습은 브라우저 안에서 돈다 — 서버도, 계정도,
 외부 API 호출도 없다.
 
-- **1장** 이미지가 토큰이 되기까지 — 패치 분할, 토큰 수, 어텐션 비용
-- **2장** 두 세계를 잇는 프로젝터 — 정렬, linear · MLP · resampler
-- 3~14장 집필 중
+전 14장 공개.
+
+| | 장 | 핵심 |
+|---|---|---|
+| 01 | 이미지가 토큰이 되기까지 | 패치 분할, 토큰 수, 어텐션 비용 |
+| 02 | 두 세계를 잇는 프로젝터 | 정렬, linear · MLP · resampler |
+| 03 | 해상도와 토큰 예산 | 동적 해상도, 타일 분할, 브라우저 WebGPU 실습 |
+| 04 | 그라운딩 — 좌표를 말하게 하기 | 박스를 텍스트로, 좌표 표기법 |
+| 05 | 제로샷 검출의 하한선 | 학습 없이 어디까지, 어디서 무너지나 |
+| 06 | LoRA — 큰 모델을 얇게 고치기 | 저랭크 어댑터, 무엇을 얼릴 것인가 |
+| 07 | 데이터 만들기 — instruction | 합성과 검증 |
+| 08 | 판정기로 쓰는 VLM | 생성 모델을 분류기처럼 |
+| 09 | 제약 채점과 확률 읽기 | 로짓을 직접 읽는 채점 |
+| 10 | 멀티모달 판정기 전환 | 텍스트 파이프라인에 이미지 붙이기 |
+| 11 | 서빙 — 양자화와 지연 | INT8·INT4, KV 캐시, 배치 |
+| 12 | 소형 VLM의 역습 | 작은 모델이 이기는 조건 |
+| 13 | 비디오 — 시간축 토큰 | 프레임 샘플링, 폭발하는 토큰 |
+| 14 | 에이전틱 VLM | 보고, 판단하고, 도구를 부르는 루프 |
 
 ## 로컬 미리보기
 
@@ -20,17 +35,18 @@
 
 ```
 index.html                    목차 · 진행률
-chapters/01.html              1장
-chapters/02.html              2장
+chapters/01.html ~ 14.html    본문 14장
 assets/css/base.css           디자인 시스템 (색 토큰 · 타이포 · LAB/퀴즈 카드)
 assets/js/site.js             챕터 레지스트리 · 레일 · 테마 · 퀴즈 엔진 · 진행상태
 assets/js/index.js            목차 렌더
-assets/js/labs/ch01-patch.js  LAB 1-1  패치 분할
-assets/js/labs/ch02-align.js  LAB 2-1  임베딩 정렬 시뮬레이터 / LAB 2-2 어댑터 비교
+assets/js/labs/chNN-*.js      장별 LAB 스크립트 (23개)
+                              ch03-webgpu.js + ch03-webgpu-worker.js 는
+                              선택형 WebGPU 실습(사용자가 버튼을 눌러야 모델 다운로드)
 _headers                      Cloudflare Pages 헤더 규칙
 404.html
 docs/DEPLOY.md                배포 안내 (wrangler · GitHub 연동)
 docs/webgpu_lab_plan.md       브라우저 내 실제 VLM 추론 LAB 타당성 조사
+docs/AUTHORING.md             집필 규약
 scripts/serve.sh              로컬 서버
 ```
 

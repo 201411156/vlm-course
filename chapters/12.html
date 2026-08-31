@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>12 소형 VLM의 역습 — VLM 워크북</title>
+<meta name="description" content="체급이 아니라 분포입니다. 소형 VLM의 계보와 구조적 공통점, full-FT와 LoRA의 갈림길, 엣지 배포와 벤치마크를 읽는 법 — 공개 수치로 파레토 지형도를 직접 그려봅니다.">
+<script>try{var t=localStorage.getItem('vlmwb_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="../assets/css/base.css">
+<style>
+/* 12장 전용 — 최소한만 */
+#pf_hw{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+  color:var(--tx);font:inherit;font-size:12.5px;padding:8px 10px}
+#pf_hw:focus-visible{outline:2px solid var(--vis);outline-offset:2px}
+#pf_table table{min-width:640px;font-size:12.5px}
+#pf_table tr[data-id]{cursor:pointer}
+#pf_table tr[data-id]:hover td{background:var(--panel2)}
+#pf_table tr.on td{background:var(--panel2);box-shadow:inset 2px 0 0 var(--vis)}
+#pf_table a{text-decoration:none;font-family:'IBM Plex Mono',monospace;font-size:11px}
+.dq{margin-bottom:14px}
+.dq label{display:block;font-size:13px;color:var(--tx2);margin-bottom:6px}
+.dt-badge{font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.14em;
+  color:var(--tx3);margin-bottom:6px}
+.dt-win{background:var(--panel2);border-radius:8px;padding:14px 16px;margin-bottom:14px;
+  border-left:3px solid var(--vis)}
+.dt-win b{display:block;font-size:18px;font-family:'Gowun Batang',serif}
+.dt-win span{font-size:13px;color:var(--tx2)}
+.dt-bars{margin:0 0 16px}
+.dt-bar{display:flex;align-items:center;gap:10px;margin:6px 0;font-size:12.5px}
+.dt-bar .nm{width:130px;flex:none;color:var(--tx2)}
+.dt-bar .tr{flex:1;height:8px;border-radius:4px;background:var(--panel2);overflow:hidden}
+.dt-bar .tr i{display:block;height:100%}
+.dt-bar .sc{width:34px;flex:none;text-align:right;font-family:'IBM Plex Mono',monospace;
+  color:var(--tx3)}
+.dt-why ul,.dt-warn ul{margin:0;padding-left:18px;font-size:13px;color:var(--tx2)}
+.dt-why li,.dt-warn li{margin:8px 0;line-height:1.65}
+.dt-why code{font-size:11px;color:var(--tx3)}
+.dt-warn{margin-top:16px;border-left:3px solid var(--lang);padding-left:14px}
+.dt-note{font-size:13px;color:var(--tx2);margin:16px 0 0;max-width:66ch}
+</style>
+</head>
+<body data-chapter="12">
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+<div class="wrap">
+<nav class="rail" aria-label="목차"></nav>
+
+<main id="main">
+  <div class="eyebrow">CHAPTER 12</div>
+  <h1>소형 VLM의 역습</h1>
+  <p class="lede">검출 파이프라인을 짜 본 사람은 이미 이 장의 결론을 알고 있습니다. 리더보드 1등 모델을 그대로 현장에 올리는 일은 거의 없습니다. 컨베이어 위 한 종류의 결함을 판정하는 데는 수 MB짜리 YOLO-n으로 충분하고, 더 빠르고, 더 쌉니다. VLM에서도 같은 일이 벌어집니다 — <b>다만 조건이 맞을 때만.</b></p>
+
+  <p>COCO 80클래스 전체를 놓고 겨루면 YOLO-n은 큰 모델에게 집니다. 그런데 "이 한 종류의 결함이 있는가"라는 <strong>좁은 분포</strong>로 옮기고 그 분포의 데이터로 전부 학습시키면 순위가 뒤집힙니다. 체급이 이긴 것이 아니라 <strong>분포가 이긴 것</strong>입니다. 이 장은 VLM에서 그 뒤집힘이 <em>언제</em> 일어나고 <em>언제 일어나지 않는지</em>에 대한 이야기입니다.</p>
+
+  <p>미리 말해 둘 것이 하나 있습니다. 여기서 다루는 것은 <strong>모델 순위표가 아니라 지형을 읽는 법</strong>입니다. 아래에 나오는 공개 수치는 반년이면 갈립니다. 갈리지 않는 것은 "무엇을 축으로 놓고 볼 것인가"입니다.</p>
+
+  <h2>1. 소형 VLM의 계보</h2>
+  <p>2023년 말부터 2025년까지, "작게 만드는" 흐름은 크게 세 갈래로 나타났습니다.</p>
+  <ul>
+    <li><strong>태스크 특화형</strong> — <b>Florence-2</b>(0.23B · 0.77B)는 캡션·검출·그라운딩·세그멘테이션을 전부 하나의 seq2seq 출력으로 통일하고, 54억 개의 자동 주석(FLD-5B)으로 학습했습니다. 제로샷 COCO 캡션에서 0.23B 모델이 <span class="tok v">CIDEr 133.0</span>을 냈는데, 같은 표의 <strong>Flamingo(80B)는 84.3</strong>이었습니다.</li>
+    <li><strong>베이스 제공형</strong> — <b>PaliGemma</b>(SigLIP-So400m 400M + Gemma-2B, 3B 미만)는 처음부터 "전이학습용 베이스"를 표방했습니다. 저자들이 직접 "instruction tuning을 하지 않은 베이스 모델을 제공하는 것"이 목적이라고 적어 두었습니다. 즉 <em>그대로 쓰라고 만든 모델이 아닙니다.</em></li>
+    <li><strong>온디바이스형</strong> — <b>SmolVLM</b>(256M · 500M · 2.2B)과 <b>moondream</b>(2B), <b>InternVL2.5-1B</b>(InternViT-300M + Qwen2.5-0.5B)처럼 애초에 메모리 예산을 먼저 정하고 그 안에서 설계한 계열입니다. SmolVLM 논문은 256M 변형이 추론에 <strong>GPU 메모리 1GB 미만</strong>을 쓴다고 보고합니다.</li>
+  </ul>
+
+  <h3>1-1. 구조적 공통점 세 가지</h3>
+  <p>출신이 다른데도 이 모델들은 비슷하게 생겼습니다.</p>
+  <p><strong>① 작은 LLM에 상대적으로 큰 인코더.</strong> 대형 모델에서 비전 인코더는 전체의 한 자릿수 퍼센트입니다(Qwen2-VL-7B: 675M / 8.3B ≈ 8%). 소형에서는 이 비율이 완전히 달라집니다 — Qwen2-VL-2B는 675M / 2.2B로 <strong>약 31%</strong>, InternVL2.5-1B는 300M / 0.9B로 <strong>3분의 1</strong>이 눈입니다. 언어 쪽을 줄여도 시각 쪽은 그만큼 줄일 수 없다는 뜻입니다.</p>
+  <p>다만 "무조건 큰 인코더"는 아닙니다. SmolVLM 논문은 <strong>균형</strong>을 강조합니다. 93M짜리 SigLIP-B/16을 135M LLM에 붙인 것이 256M 모델인데, LLM만 360M으로 키웠을 때 파라미터가 66% 늘고 성능은 11.6% 오르는 데 그쳤다고 보고합니다. 작은 모델에 거대한 인코더를 붙이는 것은 <em>비용만 늘리는</em> 선택일 수 있습니다.</p>
+  <p><strong>② 토큰 압축이 선택이 아니라 필수.</strong> 2장에서 본 pixel-shuffle입니다. 흥미로운 것은 압축률입니다 — SmolVLM은 <strong>작은 모델일수록 더 세게 압축</strong>합니다(shuffle ratio r=4, 토큰 1/16). 큰 모델이 보통 쓰는 r=2(1/4)와 대조적입니다. 작은 LLM에게 긴 시각 시퀀스는 대형보다 훨씬 치명적이기 때문입니다.</p>
+  <p><strong>③ 구조보다 데이터와 레시피.</strong> TinyLLaVA는 인코더·커넥터·LLM·데이터·레시피를 갈아 끼우며 비교한 뒤, "더 좋은 데이터와 더 좋은 레시피면 작은 모델도 큰 모델과 대등해진다"고 정리했습니다. 그들의 3.1B 모델이 LLaVA-1.5-7B를 앞섰습니다. <strong>소형화의 절반은 데이터 문제입니다.</strong></p>
+
+  <div class="note">
+    <b>검출 엔지니어를 위한 대응.</b> 백본을 mobilenet으로 갈아 끼우고, 입력 해상도를 낮추고, 넥을 얇게 만들던 그 작업과 정확히 같습니다. 다른 점은 하나 — VLM에서는 "해상도를 낮춘다"가 <strong>토큰 수를 줄인다</strong>로 나타나고, 그 비용이 제곱으로 걸린다는 것입니다(1장).
+  </div>
+
+  <div class="lab">
+    <div class="lab-tag">LAB 12-1 · 공개 수치로 그리는 지형도</div>
+    <h3>크기 · 정확도 · 속도 3축 비교</h3>
+    <p class="hint">공개 모델 11개를 <b>비용(가로) × 정확도(세로)</b> 평면에 놓았습니다. 벤치 점수는 각 모델의 논문·모델 카드에 실린 값 그대로이고(표 마지막 열이 출처), 메모리와 지연은 아래 식으로 계산한 파생값입니다. <b>가중치 슬라이더를 움직여 "내 태스크"의 모양을 바꿔 보세요</b> — 프론티어에 서 있는 모델이 바뀝니다.</p>
+    <div class="row">
+      <div>
+        <canvas id="pf" aria-label="모델별 비용 대 정확도 산점도와 파레토 프론티어"></canvas>
+        <div class="legend">
+          <span><i class="v" style="background:var(--ok)"></i>파레토 프론티어</span>
+          <span><i class="v"></i>지배당한 모델</span>
+          <span><i class="l" style="background:var(--bad)"></i>장치 메모리 초과</span>
+        </div>
+      </div>
+      <div class="ctl">
+        <div>
+          <label>가로축</label>
+          <div class="seg" id="pf_axis">
+            <button type="button" data-x="params" class="sel">파라미터</button>
+            <button type="button" data-x="mem">메모리</button>
+            <button type="button" data-x="lat">추정 지연</button>
+          </div>
+        </div>
+        <div><label for="w_mmmu">일반 추론 · MMMU <b id="w_mmmu_v">34</b></label>
+          <input type="range" id="w_mmmu" min="0" max="100" step="1" value="34"></div>
+        <div><label for="w_doc">문서 · DocVQA <b id="w_doc_v">33</b></label>
+          <input type="range" id="w_doc" min="0" max="100" step="1" value="33"></div>
+        <div><label for="w_text">장면 텍스트 · TextVQA <b id="w_text_v">33</b></label>
+          <input type="range" id="w_text" min="0" max="100" step="1" value="33"></div>
+        <div><label for="pf_hw">추론 하드웨어</label>
+          <select id="pf_hw"></select></div>
+        <div>
+          <label>가중치 정밀도</label>
+          <div class="seg" id="pf_prec">
+            <button type="button" data-p="2" class="sel">bf16</button>
+            <button type="button" data-p="1">int8</button>
+            <button type="button" data-p="0.5">int4</button>
+          </div>
+        </div>
+        <div><label for="pf_tok">이미지 토큰 <b id="pf_tokv">1,024개</b></label>
+          <input type="range" id="pf_tok" min="256" max="4096" step="256" value="1024"></div>
+        <div class="stat" id="pf_pick">점이나 표의 행을 누르면 그 모델의 공개 수치가 여기 나옵니다.</div>
+      </div>
+    </div>
+    <div id="pf_table"></div>
+    <p class="hint" style="margin:14px 0 0" id="pf_verdict"></p>
+    <p class="hint" style="margin:8px 0 0;color:var(--tx3)">
+      <b>계산식.</b> 메모리 = 파라미터 × 정밀도 바이트(활성값·KV 캐시 제외). 지연 = max(프리필 연산시간, 가중치 1회 읽기) + 32토큰 디코딩, 프리필 = 2·P·T FLOP ÷ (피크 FLOPS × 0.3), 디코딩 = 토큰당 가중치 바이트 ÷ 메모리 대역폭. <b>실측이 아니라 이론 하한</b>이고, 하드웨어 스펙도 공개 값에서 반올림한 근삿값입니다. 실제 지연은 런타임·배치·커널에 따라 몇 배씩 달라집니다(11장). 표의 <span style="color:var(--lang)">*</span> 는 가중치를 준 벤치 중 일부를 그 문헌이 보고하지 않아 나머지로만 계산했다는 표시입니다.
+    </p>
+  </div>
+
+  <p>슬라이더를 끝까지 밀어 보면 네 가지가 보입니다.</p>
+  <ul>
+    <li><strong>문서(DocVQA)만 100으로.</strong> InternVL2.5-1B가 0.9B로 프론티어에 올라서고, 자기보다 큰 moondream2·SmolVLM-2.2B·PaliGemma-3B가 한꺼번에 뒤로 밀립니다.</li>
+    <li><strong>MMMU만 100으로.</strong> 같은 1B 모델이 72B의 <strong>58%</strong>(40.9 대 70.2)에 머뭅니다. 문서에서는 <strong>88%</strong>(84.8 대 96.4)였습니다. 소형이 정확히 무엇을 잃는지가 이 두 비율 사이에 있습니다.</li>
+    <li><strong>TextVQA만 100으로.</strong> 72B가 아예 프론티어에서 사라집니다 — 7B가 84.9, 72B가 83.5이기 때문입니다. 5절에서 다시 볼 장면입니다.</li>
+    <li><strong>하드웨어를 브라우저로.</strong> bf16 기준 11개 중 8개가 빨갛게 변합니다. <em>정확도를 견주기도 전에 메모리 문턱이 먼저 걸립니다.</em></li>
+  </ul>
+  <p>그리고 기본 가중치에서 프론티어에 오른 여섯 중 둘 — Florence-2-large와 moondream2 — 은 <strong>속이 빈 점</strong>입니다. 세 벤치 중 <em>자기가 보고한 축으로만</em> 채점되었기 때문입니다. 서로 다른 논문의 표를 한 그림에 올리면 정확히 이런 일이 벌어집니다. 그래서 이 그림을 어디까지 믿을 수 있는지가 5절의 주제입니다.</p>
+
+  <h2>2. full-FT와 LoRA의 갈림길</h2>
+  <p>6장에서 LoRA는 "큰 모델을 어떻게든 한 장의 GPU에 밀어 넣는" 기술이었습니다. 그런데 소형에서는 그 전제가 사라집니다. <strong>전부 열어도 싸기 때문입니다.</strong></p>
+  <p>산수를 해 보겠습니다. 혼합정밀 AdamW로 전체 파라미터를 학습하면 파라미터 하나당 대략 <strong>16바이트</strong>가 듭니다 — bf16 가중치 2 + 그라디언트 2 + Adam 1·2차 모멘텀 4+4 + fp32 마스터 가중치 4. 활성값은 별도입니다.</p>
+
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>모델 크기</th><th>full-FT 상태 메모리</th><th>현실적 해석</th></tr></thead>
+    <tbody>
+      <tr><td class="num">256M</td><td class="num">약 4.1 GB</td><td>노트북 GPU 한 장</td></tr>
+      <tr><td class="num">500M</td><td class="num">약 8 GB</td><td>소비자용 GPU 한 장</td></tr>
+      <tr><td class="num">2.2B</td><td class="num">약 35 GB</td><td>A100 한 장(활성값까지 하면 빠듯)</td></tr>
+      <tr><td class="num">8.3B</td><td class="num">약 133 GB</td><td>여러 장 + 샤딩. 여기서 LoRA가 필요해집니다</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>즉 <strong>2B 이하에서는 "LoRA를 쓸 이유"의 절반(메모리)이 애초에 없습니다.</strong> 남은 절반은 무엇인지가 이 절의 질문입니다.</p>
+
+  <h3>2-1. full-FT가 유리한 경우</h3>
+  <p><strong>도메인이 사전학습 분포에서 멀 때.</strong> LoRA는 저랭크 갱신입니다. 표현할 수 있는 변화의 폭이 랭크로 제한됩니다. Biderman 등은 프로그래밍·수학 도메인에서 LoRA가 full-FT에 <em>상당히 못 미친다</em>고 보고하면서, full-FT가 찾아내는 갱신의 랭크가 통상적인 LoRA 설정보다 <strong>10~100배 크다</strong>는 관찰을 그 설명으로 제시했습니다. 도메인이 멀수록 필요한 갱신도 커집니다.</p>
+  <p><strong>비전 타워까지 열어야 할 때.</strong> 이쪽이 실은 더 중요합니다. 2장에서 본 대로, 조립식 VLM의 진짜 병목은 <strong>동결된 비전 인코더</strong>입니다. 사전학습 분포에 없던 질감·조명·화각이라면 언어부 어댑터가 아무리 애써도 인코더가 뽑아내지 못한 특징을 복원할 수 없습니다. 소형에서는 인코더가 100~400M이라 <em>같이 열 수 있습니다.</em> 대형에서는 엄두를 내기 어려운 선택지입니다.</p>
+  <p><strong>출력 형식을 완전히 고정할 때.</strong> 다만 정직하게 말하면, 형식 고정은 LoRA로도 대체로 됩니다. 형식은 얕은 학습으로 잡히는 성질입니다. full-FT의 이점은 형식 그 자체보다 <em>형식 + 도메인 + 시각 특징</em>을 한꺼번에 옮길 때 나타납니다.</p>
+
+  <h3>2-2. LoRA가 유리한 경우</h3>
+  <p>같은 논문이 반대 방향도 보여줍니다. LoRA는 <strong>목표 도메인 밖의 능력을 더 잘 보존</strong>하고, weight decay나 dropout보다 강한 정규화처럼 작동하며, 생성의 다양성도 더 지킵니다. 정리하면 이렇습니다.</p>
+  <ul>
+    <li><strong>베이스 능력을 지켜야 할 때</strong> — 특화 태스크 외에 다른 질문도 받아야 한다면.</li>
+    <li><strong>태스크가 여럿일 때</strong> — 어댑터만 갈아 끼우면 됩니다. full-FT는 태스크마다 모델 한 벌입니다.</li>
+    <li><strong>데이터가 적을 때</strong> — 수백 장짜리 데이터에 전체 파라미터를 열면 과적합이 빠릅니다.</li>
+  </ul>
+  <p>바꿔 말하면 full-FT의 대가는 <strong>망각</strong>입니다. 좁은 판정기를 만드는 중이라면 그 망각은 비용이 아니라 <em>사양</em>에 가깝습니다. 그런데 "겸사겸사 다른 것도 물어볼 수 있으면 좋겠다"가 요구사항에 슬쩍 들어와 있다면, 그때부터는 이야기가 달라집니다.</p>
+
+  <h2>3. 일반화를 잃고 무엇을 얻는가</h2>
+  <p>소형 모델이 잃는 것은 분명합니다. LAB 12-1의 표에서 MMMU 한 열만 봐도 됩니다 — <span class="tok v">SmolVLM-256M 29.0</span> 대 <span class="tok l">Qwen2.5-VL-72B 70.2</span>. 40점 차이입니다. 잃는 것을 나열하면:</p>
+  <ul>
+    <li><strong>세계 지식</strong> — 처음 보는 로고, 지역 특유의 표지판, 전문 분야 도표.</li>
+    <li><strong>긴 추론</strong> — 여러 단계를 거쳐야 하는 질문에서 중간에 미끄러집니다.</li>
+    <li><strong>지시 따르기의 견고성</strong> — 프롬프트 문구를 조금만 바꿔도 출력 형식이 흔들립니다.</li>
+    <li><strong>캘리브레이션</strong> — 틀렸을 때도 자신 있게 틀립니다(9장의 제약 채점이 필요해지는 이유).</li>
+  </ul>
+  <p>그런데 좁은 판정 태스크가 요구하는 것을 적어 보면 목록이 이상할 만큼 짧습니다. <strong>정해진 몇 가지 시각 단서를 보고, 닫힌 라벨 집합 중 하나를 고르고, 정해진 형식으로 뱉는 것.</strong> MMMU가 재는 대학 수준의 도메인 지식은 여기에 거의 관여하지 않습니다. <em>안 쓰는 능력을 위해 파라미터를 사고 있었던 셈입니다.</em></p>
+  <p>다만 "좁다"의 정의는 엄격해야 합니다. 세 조건이 모두 성립해야 합니다.</p>
+  <ol>
+    <li><strong>라벨 공간이 닫혀 있습니다</strong> — 새 카테고리가 계속 추가되지 않습니다.</li>
+    <li><strong>이미지 분포가 좁습니다</strong> — 카메라·조명·화각이 대체로 고정됩니다.</li>
+    <li><strong>출력 형식이 고정입니다</strong> — 자유 서술이 아닙니다.</li>
+  </ol>
+  <p>셋 중 하나라도 깨지면 소형 특화 모델은 <strong>조용히</strong> 틀리기 시작합니다. 큰 모델은 모르는 것 앞에서 얼버무리기라도 하지만, 좁게 학습된 소형 모델은 학습 분포 밖의 입력에도 <em>학습된 라벨 중 하나를 자신 있게 내놓습니다.</em> 8장에서 본 argmax의 문제가 그대로 재현됩니다.</p>
+
+  <h2>4. 엣지 — 먼저 말하는 쪽은 메모리</h2>
+  <p>엣지 배포에서는 정확도 비교보다 먼저 걸리는 문턱이 있습니다. <strong>가중치가 메모리에 들어가는가.</strong> LAB 12-1에서 하드웨어를 바꿨을 때 점들이 빨갛게 변하던 그 순간입니다.</p>
+
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>모델</th><th>bf16</th><th>int8</th><th>int4</th><th>들어가는 곳</th></tr></thead>
+    <tbody>
+      <tr><td>SmolVLM-256M</td><td class="num">0.5 GB</td><td class="num">0.26 GB</td><td class="num">0.13 GB</td><td>브라우저 탭(int8 이하) · 모바일</td></tr>
+      <tr><td>SmolVLM-500M</td><td class="num">1.0 GB</td><td class="num">0.5 GB</td><td class="num">0.25 GB</td><td>브라우저 탭(int4) · 엣지 보드</td></tr>
+      <tr><td>InternVL2.5-1B</td><td class="num">1.8 GB</td><td class="num">0.9 GB</td><td class="num">0.45 GB</td><td>엣지 보드</td></tr>
+      <tr><td>Qwen2-VL-2B</td><td class="num">4.4 GB</td><td class="num">2.2 GB</td><td class="num">1.1 GB</td><td>엣지 보드(양자화 시)</td></tr>
+      <tr><td>Qwen2.5-VL-7B</td><td class="num">16.6 GB</td><td class="num">8.3 GB</td><td class="num">4.2 GB</td><td>단일 GPU</td></tr>
+      <tr><td>Qwen2.5-VL-72B</td><td class="num">147 GB</td><td class="num">73 GB</td><td class="num">37 GB</td><td>서버 다중 GPU</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="font-size:13px;color:var(--tx3)">가중치만 계산한 값입니다(파라미터 × 정밀도 바이트). KV 캐시와 활성값이 여기에 더 붙고, 이미지 토큰이 많을수록 그 몫이 커집니다.</p>
+
+  <p><strong>브라우저.</strong> 3장의 WebGPU 실습이 SmolVLM-256M을 고른 이유가 이 표에 있습니다. HF Hub에 공개된 ONNX 파일 기준으로 fp32 합계는 약 1GB지만, 모듈별로 양자화를 지정하면 <strong>int8 약 260MB · q4f16 약 190MB</strong>까지 내려갑니다. iOS Safari의 탭당 메모리가 수백 MB 수준이라는 점을 생각하면, 이 구간이 <em>모바일 브라우저에서 실제로 뜨는 유일한 체급</em>입니다.</p>
+  <p><strong>지연의 하한.</strong> 디코딩은 연산이 아니라 <strong>메모리 대역폭</strong>이 지배합니다. 토큰 하나를 뽑을 때마다 가중치 전체를 한 번 읽어야 하기 때문입니다. 그래서 "토큰당 최소 지연 = 가중치 바이트 ÷ 대역폭"이라는 하한이 생기고, 이 하한은 <em>커널을 아무리 최적화해도</em> 내려가지 않습니다. 낮추는 방법은 둘뿐입니다 — 파라미터를 줄이거나(이 장), 정밀도를 줄이거나(11장).</p>
+  <p><strong>그런데 소형에서는 병목이 옮겨갑니다.</strong> LLM이 작아질수록 <strong>비전 인코더가 지연의 주범</strong>이 됩니다. 앞의 ①에서 본 파라미터 비중 역전이 그대로 시간에도 나타나는 것입니다. Apple의 FastVLM은 아예 인코더를 하이브리드 구조로 바꿔 토큰 수와 인코딩 시간을 함께 줄였고, 같은 0.5B LLM 기준으로 최고 해상도에서 <strong>첫 토큰까지의 시간을 85배</strong> 줄였다고 보고합니다(인코더 자체도 3.4배 작습니다). 소형 VLM을 최적화할 때 LLM만 들여다보면 절반을 놓칩니다.</p>
+
+  <h2>5. 벤치마크를 읽는 법</h2>
+  <p>LAB 12-1의 표를 다시 보십시오. 그 표는 <strong>정직하게 만들었지만 그래도 위험합니다.</strong> 어디가 위험한지 아는 것이 이 절의 목표입니다.</p>
+  <p><strong>① 서로 다른 논문의 수치를 한 축에 올렸습니다.</strong> 평가 하네스가 다르고, 프롬프트가 다르고, 답 후처리 규칙이 다릅니다. DocVQA 한 점 차이는 대개 <em>모델의 차이가 아니라 평가 코드의 차이</em>입니다.</p>
+  <p><strong>② 제로샷 수치와 전이학습 후 수치가 섞여 있습니다.</strong> Florence-2와 PaliGemma의 값은 해당 태스크로 파인튜닝한 뒤의 수치이고, SmolVLM이나 Qwen2-VL의 값은 instruction 모델을 그대로 평가한 것입니다. 이 둘은 같은 열에 놓을 성질이 아닙니다 — 점을 눌렀을 때 나오는 설명에 그 사실을 따로 적어 둔 이유입니다.</p>
+  <p><strong>③ 단일 수치는 생각보다 노이즈가 큽니다.</strong> Qwen2.5-VL은 TextVQA에서 <strong>7B가 84.9, 72B가 83.5</strong>입니다. 72B가 7B보다 못하다고 읽으면 안 됩니다. 그 벤치의 해상도가 그 정도라는 뜻으로 읽어야 합니다.</p>
+  <p><strong>④ 평균은 태스크 가중치를 몰래 정합니다.</strong> 리더보드의 "평균 점수"는 벤치 N개에 균등 가중치를 준 값입니다. 내 태스크가 문서 판정 한 종류라면 그 평균의 3분의 2는 나와 무관한 항목입니다. LAB 12-1의 슬라이더가 하는 일이 정확히 이것 — <strong>남의 가중치를 내 가중치로 바꿔 끼우기</strong>입니다.</p>
+  <p><strong>⑤ 오염을 배제할 수 없습니다.</strong> 웹 규모로 학습한 모델과 웹에 공개된 벤치는 근본적으로 겹칩니다. 공개 벤치의 절대값보다 <em>내 데이터에서의 상대 비교</em>를 믿어야 하는 이유입니다.</p>
+  <div class="note">
+    <b>그래서 실제로 해야 하는 일.</b> 후보를 3개로 줄이고, <strong>내 태스크로 200~500장</strong>을 만들어 직접 재는 것입니다. 잴 것은 평균 정확도가 아니라 ㉠ 운용 지점에서의 오탐·미탐 ㉡ p95 지연 ㉢ 실패 모드의 종류입니다. 공개 벤치는 후보를 <em>고르는</em> 데까지만 쓰고, <em>정하는</em> 데는 쓰지 않습니다.
+  </div>
+
+  <h2>6. 증류 — 큰 모델을 데이터로 바꾸기</h2>
+  <p>"작은 모델이 이긴다"의 가장 흔한 현실적 경로는 처음부터 작게 학습하는 것이 아니라, <strong>큰 모델을 작은 모델로 옮기는</strong> 것입니다. 방법은 두 층위입니다.</p>
+  <p><strong>하드 라벨 증류.</strong> 큰 모델에게 이미지를 보여주고 답을 받아 그것을 학습 데이터로 씁니다. 교사와 학생의 구조도, 토크나이저도, 어휘도 달라도 됩니다 — 주고받는 것이 <em>텍스트</em>뿐이기 때문입니다. 실은 여러분이 이미 2장에서 이 패턴을 봤습니다. LLaVA가 텍스트 전용 GPT-4에게 캡션과 박스를 주고 대화 158K개를 생성시킨 것이 바로 이 형태입니다.</p>
+  <p><strong>소프트 타깃(로짓) 증류.</strong> Hinton 등이 제안한 원형입니다. 정답 하나가 아니라 교사의 확률 분포 전체를 온도 T로 부드럽게 만들어 학생에게 맞추게 합니다. 오답들 사이의 <em>상대적 순위</em>에 담긴 정보("이 이미지는 개보다 늑대에 가깝다")까지 전달된다는 것이 핵심입니다.</p>
+  <p>다만 VLM에서는 제약이 하나 붙습니다. <strong>로짓을 맞추려면 교사와 학생의 어휘가 같아야 합니다.</strong> 토크나이저가 다르면 두 분포는 같은 축 위에 있지 않습니다. 그래서 로짓 증류는 보통 <em>같은 계열의 큰 모델 → 작은 모델</em>에서만 쓰이고, 서로 다른 계열 사이에서는 하드 라벨 증류가 사실상 유일한 선택지입니다.</p>
+  <p>Beyer 등은 증류를 <strong>함수 맞추기</strong>로 보아야 한다고 정리했습니다. 교사와 학생이 <em>완전히 같은 입력(같은 증강까지)</em>을 보게 하고, 아주 오래 학습시키라는 것입니다. "짧게 돌려보니 증류가 별로던데"의 상당수는 인내심 부족이었다는 이야기입니다.</p>
+  <div class="note">
+    <b>실전 레시피.</b> ㉠ 대형 모델로 라벨을 대량 생성 → ㉡ <strong>사람이 검수한 오라클 셋 200~500장</strong>은 따로 떼어 두고(학습에 절대 넣지 않습니다) → ㉢ 소형을 full-FT → ㉣ 소형이 확신하지 못하는 구간만 대형으로 라우팅. 한 가지만 기억하면 됩니다 — <strong>교사 라벨의 오류율이 학생 성능의 상한입니다.</strong> 교사를 재지 않고 학생만 재면, 학생이 교사의 실수를 얼마나 충실히 배웠는지를 재게 됩니다.
+  </div>
+
+  <h2>7. 선택 가이드</h2>
+  <p>지금까지의 이야기를 축 세 개로 압축하면 이렇습니다.</p>
+  <ul>
+    <li><strong>태스크 폭</strong> — 닫힌 라벨 한 종류인가, 열린 질문인가. 소형이 이길 수 있는지를 결정하는 <em>1차 변수</em>입니다.</li>
+    <li><strong>지연 예산</strong> — 100ms인가, 수 초인가. 하드 제약이라 협상이 되지 않습니다.</li>
+    <li><strong>데이터량</strong> — 학습 경로를 쓸 수 있는지를 결정합니다. 라벨이 없으면 특화는 시작조차 못 합니다.</li>
+  </ul>
+  <p>여기에 하드웨어와 출력 형식을 더해 다섯 가지로 답을 좁혀 보겠습니다.</p>
+
+  <div class="lab">
+    <div class="lab-tag">LAB 12-2 · 결정 트리</div>
+    <h3>다섯 질문으로 전략 고르기</h3>
+    <p class="hint">답을 고르면 네 전략(<b>소형 full-FT</b> · <b>중형 LoRA</b> · <b>대형 제로샷</b> · <b>대형 → 소형 증류</b>)에 점수가 매겨집니다. 점수표는 이 장 본문의 근거를 숫자로 옮긴 것이고, 어디서 몇 점이 왔는지 전부 아래에 적힙니다 — <b>동의하지 않는 줄이 있다면 그 줄이 곧 토론거리입니다.</b></p>
+    <div class="row">
+      <div class="ctl" style="min-width:260px" id="dt_q"></div>
+      <div class="ctl" style="min-width:280px" id="dt_out"></div>
+    </div>
+    <p class="hint" style="margin:14px 0 0">답을 하나씩 바꿔 보면 <b>어느 질문이 결과를 지배하는지</b>가 보입니다. 대개 ①태스크 폭과 ③데이터량이 나머지 셋을 합친 것보다 크게 움직입니다.</p>
+  </div>
+
+  <p>마지막으로 순서에 대한 이야기 하나. <strong>거의 항상 대형 제로샷부터 재야 합니다.</strong> 큰 모델로도 안 되는 태스크는 작은 모델로도 안 되는 경우가 많고, 그 사실을 하루 만에 알아내는 것이 3주짜리 학습 파이프라인을 짓고 알아내는 것보다 훨씬 쌉니다. 대형으로 상한을 재고, 그 상한이 쓸 만하면 <em>그때부터</em> 줄이기 시작합니다. 이 장의 제목이 "역습"인 것은, 그 순서를 건너뛰어도 된다는 뜻이 아닙니다.</p>
+
+  <h2>8. 확인 문제</h2>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 12-1</div>
+    <p class="q">256M짜리 VLM을 혼합정밀 AdamW로 <b>전체 파라미터</b> 학습할 때, 옵티마이저 상태까지 포함한 대략적인 메모리는 얼마일까요? (활성값 제외)</p>
+    <div class="opts" id="q1">
+      <button type="button" data-a="0">약 0.5GB — 가중치를 bf16으로 올린 크기 그대로입니다</button>
+      <button type="button" data-a="1">약 4GB — 파라미터당 16바이트(가중치 2 + 그라디언트 2 + Adam 4+4 + fp32 마스터 4)</button>
+      <button type="button" data-a="0">약 40GB — 학습은 추론보다 항상 100배 정도의 메모리를 씁니다</button>
+    </div>
+    <div class="expl" id="e1">학습 상태는 가중치만이 아닙니다. bf16 가중치 2바이트에 그라디언트 2바이트, Adam의 1·2차 모멘텀 4+4바이트, fp32 마스터 가중치 4바이트를 더해 <b>파라미터당 약 16바이트</b>가 기준선입니다. 256M × 16바이트 ≈ 4.1GB — <b>노트북 GPU 한 장에 들어갑니다.</b> 소형에서 "LoRA를 쓸 이유"의 절반이 사라지는 지점이 바로 여기입니다. 같은 계산을 8.3B에 하면 133GB가 되어 이야기가 완전히 달라집니다.</div>
+  </div>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 12-2</div>
+    <p class="q">리더보드에서 A(7B)가 평균 62점, B(0.5B)가 평균 51점입니다. 내가 만들 것은 고정 카메라에서 정해진 라벨 하나를 뱉는 판정기이고, 라벨 데이터는 3천 장 만들 수 있습니다. 가장 합리적인 다음 행동은 무엇일까요?</p>
+    <div class="opts" id="q2">
+      <button type="button" data-a="0">평균이 11점 높으므로 A를 선택합니다. 벤치 점수는 종합적인 능력의 지표입니다</button>
+      <button type="button" data-a="1">평균의 가중치가 내 태스크와 다르므로, 내 데이터 수백 장으로 두 모델을 직접 재고 운용 지점의 오탐·미탐으로 결정합니다</button>
+      <button type="button" data-a="0">둘 다 버리고 더 큰 모델의 제로샷 성능을 봅니다. 특화 학습은 벤치가 낮은 모델에게만 필요합니다</button>
+    </div>
+    <div class="expl" id="e2">리더보드의 평균은 벤치 N개에 <b>균등 가중치</b>를 준 값입니다. 그 안에는 대학 수준 지식, 수학 도표, 장면 텍스트가 뒤섞여 있고 — 고정 카메라 판정기에는 대부분 무관합니다. 게다가 3천 장의 라벨이 있다면 그 차이의 상당 부분은 학습으로 뒤집힙니다. 공개 벤치는 후보를 <b>좁히는</b> 데까지만 쓰고, 결정은 내 데이터에서 내는 것이 원칙입니다. LAB 12-1의 가중치 슬라이더가 재현하는 상황이 바로 이것입니다.</div>
+  </div>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 12-3</div>
+    <p class="q">다른 회사가 만든 대형 VLM을 교사로, 내가 고른 소형 VLM을 학생으로 증류하려 합니다. 로짓(소프트 타깃) 증류가 어려운 가장 직접적인 이유는 무엇일까요?</p>
+    <div class="opts" id="q3">
+      <button type="button" data-a="0">소형 모델은 파라미터가 적어 소프트 타깃을 표현할 수 있는 확률 분포의 자유도가 없기 때문입니다</button>
+      <button type="button" data-a="1">두 모델의 토크나이저·어휘가 다르면 로짓이 같은 축 위에 있지 않아 분포를 맞출 수 없기 때문입니다</button>
+      <button type="button" data-a="0">로짓 증류는 교사와 학생의 이미지 해상도가 같아야만 성립하기 때문입니다</button>
+    </div>
+    <div class="expl" id="e3">소프트 타깃 증류는 <b>어휘 차원에서 정의된 두 분포</b>를 맞추는 일입니다. 어휘와 토크나이저가 다르면 두 벡터는 애초에 같은 좌표계가 아닙니다(2장에서 본 문제와 같은 종류입니다). 그래서 계열이 다른 모델 사이에서는 보통 <b>하드 라벨 증류</b> — 교사의 출력 텍스트를 그대로 학습 데이터로 쓰는 방식 — 만 성립합니다. 대신 이 방식은 구조·어휘·해상도가 전부 달라도 되고, 라벨을 사람이 검수할 수 있다는 큰 장점이 있습니다.</div>
+  </div>
+
+  <div class="refs">
+    <h2>더 읽을거리</h2>
+    <ol>
+      <li>Marafioti et al., <a href="https://arxiv.org/abs/2504.05299">SmolVLM: Redefining small and efficient multimodal models</a>, 2025 — 256M/500M/2.2B의 설계 근거, 인코더-LM 균형, 공격적 pixel shuffle(r=4), RAM 0.8~4.9GB.</li>
+      <li>Xiao et al., <a href="https://arxiv.org/abs/2311.06242">Florence-2</a>, CVPR 2024 — 0.23B의 제로샷 COCO 캡션 CIDEr 133.0 대 Flamingo-80B 84.3. 태스크를 통일하면 얼마나 작아질 수 있는가.</li>
+      <li>Beyer et al., <a href="https://arxiv.org/abs/2407.07726">PaliGemma</a>, 2024 — 3B 미만 베이스 VLM. "전이학습용으로 내놓는다"는 설계 선언과 해상도별 전이 결과.</li>
+      <li>vikhyatk, <a href="https://huggingface.co/vikhyatk/moondream2">moondream2 모델 카드</a> — 온디바이스 지향 2B 모델의 릴리스별 벤치 변화(DocVQA·ChartQA·OCRBench·포인팅).</li>
+      <li>Chen et al., <a href="https://arxiv.org/abs/2412.05271">InternVL 2.5</a>, 2024 — 1B급(InternViT-300M + Qwen2.5-0.5B)까지 내려간 계열의 전체 벤치 표.</li>
+      <li>Zhou et al., <a href="https://arxiv.org/abs/2402.14289">TinyLLaVA</a>, 2024 — 인코더·커넥터·LLM·레시피를 갈아 끼운 통제 실험. 데이터와 레시피가 구조를 이깁니다.</li>
+      <li>Vasu et al., <a href="https://arxiv.org/abs/2412.13303">FastVLM</a>, CVPR 2025 — 소형에서 지연의 주범이 비전 인코더로 옮겨간다는 관찰과 그 대응.</li>
+      <li>Biderman et al., <a href="https://arxiv.org/abs/2405.09673">LoRA Learns Less and Forgets Less</a>, 2024 — full-FT와 LoRA의 정확한 트레이드오프. 갱신 랭크가 10~100배 차이납니다.</li>
+      <li>Hinton et al., <a href="https://arxiv.org/abs/1503.02531">Distilling the Knowledge in a Neural Network</a>, 2015 — 소프트 타깃과 온도.</li>
+      <li>Beyer et al., <a href="https://arxiv.org/abs/2106.05237">Knowledge distillation: A good teacher is patient and consistent</a>, CVPR 2022 — 증류를 함수 맞추기로 보는 관점. 같은 뷰, 긴 학습.</li>
+    </ol>
+  </div>
+
+  <div class="next">
+    이전 장 — <a href="11.html">11 서빙 — 양자화와 지연</a><br>
+    다음 장 — <a href="13.html"><b>13 비디오 — 시간축 토큰</b></a>: 한 장에서 1,024개였던 토큰이 30프레임이 되면 어떻게 되는지 — 이 장에서 아낀 예산이 가장 빨리 사라지는 곳입니다.
+  </div>
+
+  <footer>VLM 워크북 · 개인 학습 노트 · 인터랙티브 실습은 전부 브라우저 안에서 돕니다.</footer>
+</main>
+</div>
+
+<script defer src="../assets/js/site.js"></script>
+<script defer src="../assets/js/labs/ch12-pareto.js"></script>
+<script defer src="../assets/js/labs/ch12-decide.js"></script>
+</body>
+</html>

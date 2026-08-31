@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>06 LoRA — 큰 모델을 얇게 고치기 — VLM 워크북</title>
+<meta name="description" content="ΔW = BA 라는 한 줄에서 시작하는 저랭크 적응. 랭크·스케일·초기화의 의미, 무엇을 얼리고 무엇을 열 것인가, QLoRA의 메모리 산수, 그리고 병합과 어댑터 서빙까지 직접 만져봅니다.">
+<script>try{var t=localStorage.getItem('vlmwb_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="../assets/css/base.css">
+<style>
+/* 6장 전용 최소 스타일 */
+.maps{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start}
+.maps figure{margin:0;display:flex;flex-direction:column;gap:6px}
+.maps figcaption{font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--tx3);
+  letter-spacing:.06em}
+.fig{margin:26px 0}
+.fig svg{max-width:100%;height:auto;display:block;margin:0 auto}
+.fig .cap{font-size:12.5px;color:var(--tx3);text-align:center;margin:8px auto 0;max-width:60ch}
+.mmrow{margin:0 0 10px}
+.mmhead{display:flex;justify-content:space-between;gap:10px;
+  font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--tx2)}
+.mmtrack{display:flex;height:12px;border-radius:4px;background:var(--panel2);
+  overflow:hidden;margin-top:4px}
+.mmtrack i{display:block;height:100%}
+.mmrow.on .mmhead span{color:var(--tx)}
+.mmrow.on .mmtrack{outline:1px solid var(--vis);outline-offset:2px}
+#mm_cmp{position:relative;padding-top:15px;margin-top:6px}
+.mmmark{position:absolute;top:0;bottom:6px;width:0;border-left:1px dashed var(--tx3);opacity:.75}
+.mmmark b{position:absolute;top:-3px;left:3px;font-weight:400;white-space:nowrap;
+  font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--tx3)}
+.mmlegend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--tx2);margin-top:12px}
+.mmlegend span{display:inline-flex;align-items:center;gap:5px}
+.mmlegend i{width:10px;height:10px;border-radius:2px;display:inline-block}
+</style>
+</head>
+<body data-chapter="06">
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+<div class="wrap">
+<nav class="rail" aria-label="목차"></nav>
+
+<main id="main">
+  <div class="eyebrow">CHAPTER 06</div>
+  <h1>LoRA — 큰 모델을 얇게 고치기</h1>
+  <p class="lede">여기까지는 이미 학습된 모델을 그대로 쓰는 이야기였습니다. 이제 <b>고쳐야</b> 합니다. 문제는 고칠 대상이 70억 개라는 것입니다. 전부 여는 것도, 전부 얼리는 것도 답이 아닙니다. 이 장은 세 번째 길 — <b>큰 행렬 옆에 얇은 행렬 두 장을 덧대는</b> 방법 — 에 대한 것입니다.</p>
+
+  <h2>1. 익숙한 두 선택지, 그리고 없는 세 번째</h2>
+  <p>검출기를 새 도메인에 맞출 때 손이 먼저 가는 선택지는 둘입니다. 데이터가 적으면 <strong>백본을 얼리고 헤드만</strong> 학습합니다. 데이터가 충분하면 <strong>전부 엽니다</strong>. 어느 쪽이든 몇 시간이면 끝나고, 안 되면 다시 돌리면 됩니다.</p>
+  <p>VLM에서는 이 두 습관이 모두 어긋납니다.</p>
+  <p><strong>"헤드만"이 성립하지 않습니다.</strong> VLM에는 갈아 끼울 헤드가 없기 때문입니다. 검출기라면 마지막 컨볼루션 몇 개가 클래스와 좌표를 만들어내지만, VLM에서 답을 만드는 것은 마지막 층 하나가 아니라 <strong>수십 개 층에 걸친 어텐션 전체</strong>입니다. 출력 쪽 <code>lm_head</code>만 열어봐야 어휘 분포를 미세하게 흔드는 정도이고, 정작 바꾸고 싶은 "무엇을 보고 무엇을 근거로 판단하는가"는 훨씬 아래층에 있습니다.</p>
+  <p><strong>"전부"도 성립하지 않습니다.</strong> 이쪽은 이유가 훨씬 산문적입니다 — 메모리가 없습니다.</p>
+
+  <h3>1-1. 파라미터당 16바이트</h3>
+  <p>혼합정밀 AdamW로 파라미터 하나를 학습시키는 데 드는 메모리를 세어 보면 이렇습니다.</p>
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>무엇</th><th>정밀도</th><th>파라미터당</th></tr></thead>
+    <tbody>
+      <tr><td>가중치</td><td>bf16</td><td class="num">2 바이트</td></tr>
+      <tr><td>그래디언트</td><td>bf16</td><td class="num">2 바이트</td></tr>
+      <tr><td>Adam 1차 모멘트</td><td>fp32</td><td class="num">4 바이트</td></tr>
+      <tr><td>Adam 2차 모멘트</td><td>fp32</td><td class="num">4 바이트</td></tr>
+      <tr><td>fp32 마스터 사본</td><td>fp32</td><td class="num">4 바이트</td></tr>
+      <tr><td><b>합계</b></td><td></td><td class="num"><b>16 바이트</b></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>7B 모델이면 <span class="tok v">6.7×10⁹ × 16 = 약 100GB</span>입니다. 활성화는 아직 한 바이트도 세지 않았습니다. 가장 큰 단일 가속기(80GB)에도 <strong>모델 하나가 들어가지 않습니다</strong>. 눈여겨볼 점은 그중 <em>가중치가 차지하는 몫은 8분의 1뿐</em>이라는 것입니다. 나머지 일곱은 전부 "학습하기 위한 부속물"입니다.</p>
+  <p>바로 여기에 빈틈이 있습니다. 부속물은 <strong>학습하는 파라미터에만</strong> 붙습니다. 학습 대상을 100분의 1로 줄이면, 부속물도 100분의 1이 됩니다.</p>
+
+  <h3>1-2. 그리고 망각</h3>
+  <p>메모리가 넉넉해도 전체 파인튜닝에는 두 번째 문제가 있습니다. 수천 장짜리 도메인 데이터로 수십억 개 파라미터를 전부 흔들면, 모델이 원래 할 줄 알던 것을 잃습니다. <strong>재앙적 망각</strong>입니다. VLM에서는 이것이 두 방향으로 아픕니다 — 언어 능력이 무너지면 판정은 맞아도 설명이 엉키고, 시각 능력이 무너지면 학습 분포를 조금만 벗어나도 무너집니다.</p>
+  <p>흥미롭게도 LoRA는 이 지점에서 <em>덤</em>을 줍니다. Biderman 등(2024)은 LoRA가 전체 파인튜닝보다 목표 과제를 <strong>덜 배우는</strong> 대신 원래 능력을 <strong>덜 잊는다</strong>고 보고했습니다. 저랭크 제약이 정규화처럼 작동하는 셈입니다. 메모리를 아끼려고 고른 방법이 망각까지 막아 준다는 것 — 이 두 이득이 겹치는 지점이 LoRA가 표준이 된 이유입니다.</p>
+
+  <h2>2. ΔW = BA — 한 줄짜리 아이디어</h2>
+  <p>파인튜닝이 실제로 하는 일을 다시 써 봅시다. 사전학습된 가중치 W<sub>0</sub>(d×k 행렬)가 있고, 학습이 끝나면 W<sub>0</sub> + ΔW가 됩니다. 우리가 원하는 것은 W<sub>0</sub>가 아니라 <strong>ΔW</strong>입니다.</p>
+  <p>LoRA의 가설은 이것입니다 — <strong>ΔW는 랭크가 낮다.</strong> 사전학습으로 이미 잘 하는 모델을 특정 과제 쪽으로 "조금 옮기는" 일이라면, 그 이동은 몇 개 방향으로만 일어날 것이라는 직관입니다. 실제로 Aghajanyan 등(2021)은 언어 모델의 파인튜닝이 놀랄 만큼 낮은 <em>내재 차원</em>에서 이루어진다는 것을 실험으로 보였고, LoRA는 그 관찰을 구조로 못 박았습니다.</p>
+  <p>그렇다면 ΔW를 저장하지 말고 <strong>얇은 두 행렬의 곱으로 만들어</strong> 버리면 됩니다.</p>
+  <p style="font-family:'IBM Plex Mono',monospace;font-size:15px;color:var(--tx);margin:20px 0">
+    h = W<sub>0</sub>x + <span class="tok v">(α/r) · B A x</span> &nbsp;&nbsp;
+    <span style="color:var(--tx3);font-size:13px">B ∈ ℝ<sup>d×r</sup>, &nbsp;A ∈ ℝ<sup>r×k</sup>, &nbsp;r ≪ min(d,k)</span>
+  </p>
+  <p>W<sub>0</sub>는 건드리지 않습니다. 학습되는 것은 A와 B뿐입니다. 파라미터 수가 <span class="tok l">d·k</span>에서 <span class="tok v">r·(d+k)</span>로 바뀝니다. d = k = 4096, r = 16이라면 <strong>1,678만 개가 13만 개</strong> — 128분의 1입니다.</p>
+
+  <div class="fig">
+    <svg viewBox="0 0 640 208" role="img" aria-label="LoRA 구조: 동결된 W0 와 병렬로 놓인 얇은 A·B 경로가 합쳐지는 그림">
+      <g font-family="'IBM Plex Mono', monospace" font-size="12">
+        <!-- 입력 -->
+        <text x="8" y="108" fill="var(--tx2)" font-size="13">x</text>
+        <path d="M22 103 H58" stroke="var(--tx3)" fill="none" stroke-width="1.2"/>
+        <path d="M58 56 V150" stroke="var(--tx3)" fill="none" stroke-width="1.2"/>
+        <path d="M58 56 H92" stroke="var(--tx3)" fill="none" stroke-width="1.2"/>
+        <path d="M58 150 H92" stroke="var(--tx3)" fill="none" stroke-width="1.2"/>
+
+        <!-- 동결된 W0 -->
+        <rect x="94" y="32" width="196" height="48" rx="6" fill="var(--panel2)"
+              stroke="var(--tx3)" stroke-width="1.2" stroke-dasharray="4 3"/>
+        <text x="192" y="54" fill="var(--tx)" text-anchor="middle" font-size="13">W₀ &nbsp;(d × k)</text>
+        <text x="192" y="70" fill="var(--tx3)" text-anchor="middle" font-size="10.5">동결 — 갱신하지 않음</text>
+
+        <!-- 얇은 경로 A → B -->
+        <rect x="94" y="140" width="104" height="20" rx="4" fill="var(--vis-dim)"
+              stroke="var(--vis)" stroke-width="1.2"/>
+        <text x="146" y="154" fill="var(--vis)" text-anchor="middle" font-size="11.5">A (r × k)</text>
+        <text x="146" y="177" fill="var(--tx3)" text-anchor="middle" font-size="10.5">가우시안 초기화</text>
+
+        <path d="M198 150 H216" stroke="var(--vis)" fill="none" stroke-width="1.2"/>
+        <rect x="218" y="128" width="34" height="44" rx="4" fill="var(--vis-dim)"
+              stroke="var(--vis)" stroke-width="1.2"/>
+        <text x="235" y="154" fill="var(--vis)" text-anchor="middle" font-size="11.5">B</text>
+        <text x="235" y="192" fill="var(--tx3)" text-anchor="middle" font-size="10.5">0으로 초기화</text>
+
+        <path d="M252 150 H300" stroke="var(--vis)" fill="none" stroke-width="1.2"/>
+        <text x="276" y="141" fill="var(--lang)" text-anchor="middle" font-size="11">× α/r</text>
+
+        <!-- 합류 -->
+        <path d="M290 56 H400" stroke="var(--tx3)" fill="none" stroke-width="1.2"/>
+        <path d="M400 56 V90" stroke="var(--tx3)" fill="none" stroke-width="1.2"/>
+        <path d="M300 150 H400" stroke="var(--vis)" fill="none" stroke-width="1.2"/>
+        <path d="M400 150 V118" stroke="var(--vis)" fill="none" stroke-width="1.2"/>
+        <circle cx="400" cy="104" r="13" fill="var(--panel)" stroke="var(--tx2)" stroke-width="1.2"/>
+        <text x="400" y="109" fill="var(--tx)" text-anchor="middle" font-size="14">+</text>
+        <path d="M413 104 H452" stroke="var(--tx3)" fill="none" stroke-width="1.2"/>
+        <path d="M452 104 l-7 -4 v8 z" fill="var(--tx3)"/>
+        <text x="462" y="109" fill="var(--tx2)" font-size="13">h</text>
+
+        <!-- r 표시 -->
+        <path d="M94 168 H198" stroke="var(--lang)" fill="none" stroke-width="1" opacity="0"/>
+        <text x="530" y="60" fill="var(--tx3)" font-size="10.5">파라미터 d·k</text>
+        <text x="530" y="152" fill="var(--vis)" font-size="10.5">파라미터 r·(d+k)</text>
+      </g>
+    </svg>
+    <p class="cap">두 경로는 <b>병렬</b>입니다. 층을 새로 끼워 넣는 것이 아니라 기존 층 옆에 나란히 붙습니다 — 나중에 병합이 가능한 이유가 여기에 있습니다.</p>
+  </div>
+
+  <h3>2-1. 왜 B를 0으로 두는가</h3>
+  <p>A는 작은 가우시안으로, B는 <strong>정확히 0</strong>으로 초기화합니다. 그러면 학습 시작 시점에 BA = 0이고, 모델은 <em>원본과 한 치도 다르지 않습니다</em>. 어댑터를 붙였다고 해서 성능이 먼저 떨어졌다가 회복하는 일이 없습니다. 사전학습으로 얻은 것을 한 스텝도 잃지 않은 채 출발한다는 뜻입니다.</p>
+  <p>그렇다면 <strong>둘 다 0으로</strong> 두면 더 안전할까요? 정반대입니다. B = 0이면 A의 그래디언트가 Bᵀ(…)이므로 0이고, A = 0이면 B의 그래디언트가 (…)Aᵀ이므로 0입니다. 둘 다 0이면 <strong>양쪽 모두 영원히 움직이지 않습니다.</strong> 대칭을 깨려면 정확히 한쪽만 0이어야 합니다.</p>
+
+  <h3>2-2. α/r 은 무엇인가</h3>
+  <p>스케일 α/r은 <strong>r을 바꿔도 업데이트의 크기가 비슷하게 유지되도록</strong> 하는 장치입니다. r을 8에서 32로 올리면 BA에 더해지는 항이 그만큼 많아지는데, α/r로 나눠 두면 총량이 비슷하게 유지되어 <em>학습률을 다시 찾을 필요가 없습니다</em>. LoRA 저자들도 α를 처음 시도한 r 값으로 두고 이후 튜닝하지 않았다고 밝혔습니다. α는 성능을 짜내는 손잡이가 아니라 <strong>학습률과 얽힌 상수</strong>로 보는 편이 정확합니다.</p>
+  <p>다만 이 나눗셈에는 대가가 있습니다. r이 커질수록 성분 하나하나의 기여가 1/r로 눌리기 때문에, 높은 랭크에서 학습이 정체됩니다. Kalajdzievski(2023)는 α/r 대신 <strong>α/√r</strong>을 쓰면 이 정체가 사라진다는 것을 보였습니다(rsLoRA). "r을 올렸는데 좋아지지 않더라"의 상당 부분이 사실은 <em>스케일 탓</em>이었다는 이야기입니다.</p>
+
+  <div class="note">
+    <b>계산량은 줄지 않습니다.</b> LoRA가 지우는 것은 옵티마이저 상태와 그래디언트이지 순전파·역전파 그 자체가 아닙니다. 아래층 어댑터에 학습 신호를 보내려면 역전파가 <em>동결된 W₀들을 그대로 타고</em> 끝까지 내려가야 합니다. 그래서 활성화 메모리와 스텝당 시간은 거의 그대로입니다 — LAB 6-2에서 이 사실이 아프게 확인됩니다.
+  </div>
+
+  <div class="lab">
+    <div class="lab-tag">LAB 6-1 · 랭크를 깎아 보기</div>
+    <h3>저랭크 근사 시각화</h3>
+    <p class="hint">64×64 행렬을 SVD로 분해한 뒤 상위 r개 성분만 남겨 다시 조립합니다. 왼쪽이 원본, 가운데가 랭크 r 재구성, 오른쪽이 차이(4배 확대)입니다. 아래 막대는 64개의 특이값이고, 점선 왼쪽만 살아남습니다. <b>재료를 바꿔 가며, 어디까지 깎아도 원본처럼 보이는지</b> 찾아보세요.</p>
+    <div class="row">
+      <div>
+        <div class="maps">
+          <figure><canvas id="lr_orig" aria-label="원본 행렬 히트맵"></canvas>
+            <figcaption>원본 A</figcaption></figure>
+          <figure><canvas id="lr_rec" aria-label="랭크 r 재구성 히트맵"></canvas>
+            <figcaption>재구성 A_r</figcaption></figure>
+          <figure><canvas id="lr_err" aria-label="원본과 재구성의 차이 히트맵"></canvas>
+            <figcaption>오차 ×4</figcaption></figure>
+        </div>
+        <div style="margin-top:14px">
+          <canvas id="lr_spec" aria-label="특이값 64개 막대그래프"></canvas>
+        </div>
+        <div class="legend">
+          <span><i class="v"></i>양수</span>
+          <span><i class="l"></i>음수</span>
+        </div>
+      </div>
+      <div class="ctl">
+        <div>
+          <label>재료</label>
+          <div class="seg" id="lr_src">
+            <button type="button" data-src="struct" class="sel">구조적</button>
+            <button type="button" data-src="image">이미지</button>
+            <button type="button" data-src="noise">잡음</button>
+            <button type="button" data-src="rank4">랭크 4</button>
+          </div>
+        </div>
+        <div>
+          <label for="lr_r">유지할 랭크 <b id="lr_rv">r = 8</b></label>
+          <input type="range" id="lr_r" min="1" max="64" step="1" value="8">
+        </div>
+        <div class="stat">
+          원본 파라미터 <span id="lr_pfull">4,096</span><br>
+          저랭크 파라미터 <b id="lr_plora">1,024</b><br>
+          비율 <span id="lr_pratio" class="good">25%</span><br>
+          상대 오차 <span id="lr_perr">4.6%</span><br>
+          다음 성분 σ<sub>r+1</sub>/σ₁ <span id="lr_peng">2.4%</span>
+        </div>
+      </div>
+    </div>
+    <p class="hint" style="margin:14px 0 0" id="lr_verdict"></p>
+    <p class="hint" style="margin:6px 0 0;color:var(--tx3)">저랭크 파라미터는 2·d·r(= A와 B의 크기 합)입니다. d = 64이므로 <b>r = 32에서 원본과 같아집니다</b> — 그 위로는 압축이 아니라 팽창입니다. <b>다음 성분</b>은 아직 버려진 것 중 가장 큰 특이값이므로, 이 값이 0에 가까우면 r을 더 올려도 얻을 것이 없다는 뜻입니다. SVD는 단측 야코비 회전으로 브라우저 안에서 직접 계산합니다.</p>
+  </div>
+
+  <h2>3. 왜 저랭크로 충분한가 — 그리고 언제 아닌가</h2>
+  <p>LAB에서 <b>잡음</b>을 골라 보면 이야기가 분명해집니다. i.i.d. 가우시안 행렬은 특이값이 거의 평평해서, 랭크를 절반(r = 32)까지 남겨도 오차가 30%대로 남습니다. 그런데 그 지점에서는 파라미터가 이미 원본과 같습니다. <strong>구조가 없는 행렬은 저랭크로 압축되지 않습니다.</strong></p>
+  <p><b>구조적</b>을 고르면 이야기가 정반대로 갑니다. 그런데 여기서 한 가지를 짚고 가야 합니다 — 이 행렬은 <em>랭크가 부족하지 않습니다</em>. 64개 특이값이 하나도 0이 아닙니다. 그런데도 r = 8이면 오차가 4.6%, r = 16이면 2.1%로 떨어집니다. 위쪽 몇 개가 압도적으로 크기 때문입니다. <strong>"랭크가 낮다"가 아니라 "실질적으로 낮다"</strong> — LoRA가 기대는 것은 정확히 이쪽입니다. <b>이미지</b>는 더 극적이어서 r = 4에서 20%였던 오차가 r = 8에서 2.5%로 꺾입니다. 파라미터는 4분의 1인데 눈으로는 구분되지 않습니다.</p>
+  <p><b>랭크 4</b>는 극단적인 대조군입니다. 진짜 랭크가 4이므로 r = 4에서 오차가 정확히 0이 되고, 그 위로 아무리 올려도 <em>얻는 것이 하나도 없습니다</em>. "다음 성분" 값이 0으로 떨어지는 순간이 곧 r을 그만 올려도 되는 지점입니다.</p>
+  <p>LoRA가 성립하는가는 결국 이 질문 하나로 환원됩니다. <strong>내 ΔW는 어느 쪽을 닮았는가?</strong></p>
+  <ul>
+    <li><strong>구조적인 쪽에 가까울 때</strong> — 데이터가 수천~수십만 건이고, 하려는 일이 도메인·형식·말투 적응입니다. 배워야 할 방향 자체가 몇 개 안 됩니다. LoRA가 잘 맞습니다.</li>
+    <li><strong>잡음 쪽에 가까울 때</strong> — 수십억 토큰짜리 계속학습, 새 언어, 새 모달리티처럼 <em>정말로 많은 것</em>을 배워야 할 때입니다. Biderman 등(2024)이 코드·수학 도메인에서 LoRA가 전체 파인튜닝에 뒤처지는 것을 관찰한 지점이 정확히 여기입니다.</li>
+  </ul>
+  <p>실제 모델의 숫자 감각도 잡아 둡시다. LAB의 64×64에서는 r = 32가 손익분기점이었지만, d = 4096인 실제 층에서 그 지점은 r = 2048입니다. 우리가 쓰는 <strong>r = 8~64는 손익분기점 근처에도 가지 않습니다</strong> — 실무에서 랭크를 아끼는 이유는 파라미터 수가 아니라 <em>과적합과 학습 안정성</em> 쪽에 있습니다.</p>
+
+  <h2>4. 어디에 붙일 것인가 — 선택 지도</h2>
+
+  <h3>4-1. 어떤 행렬에</h3>
+  <p>트랜스포머 한 층에는 LoRA를 걸 수 있는 선형층이 일곱 개 있습니다. 어텐션의 <code>q · k · v · o</code>, MLP의 <code>gate · up · down</code>입니다. 여기서 두 편의 논문이 서로 다른 답을 내놓았고, 그 차이가 중요합니다.</p>
+  <ul>
+    <li><strong>LoRA 원 논문</strong>은 어텐션만 건드렸고, <em>같은 파라미터 예산이라면 한 행렬에 몰아주는 것보다 q와 v에 나눠 붙이는 편이 낫다</em>고 보고했습니다. r = 4 정도로도 충분했고, r = 1이나 2에서도 상당한 성능이 나왔습니다.</li>
+    <li><strong>QLoRA</strong>는 여기에 결정적인 단서를 붙였습니다. 전체 파인튜닝을 <em>따라잡으려면</em> 어텐션만으로는 부족하고 <strong>모든 선형층</strong>에 어댑터를 달아야 했습니다. 그리고 저자들은 r 자체는 그만큼 중요하지 않았다고 적었습니다.</li>
+  </ul>
+  <p>둘을 겹치면 실전 규칙이 나옵니다 — <strong>얇게, 대신 넓게.</strong> 예산이 한정되어 있다면 r을 두 배 올리기보다 <em>대상 모듈을 늘리는 편</em>이 대체로 낫습니다. LAB 6-2에서 두 선택의 메모리 값이 얼마나 다른지(사실 거의 다르지 않습니다) 확인할 수 있습니다.</p>
+
+  <h3>4-2. VLM의 세 부분</h3>
+  <p>2장에서 본 조립 구조 — 비전 인코더 · 프로젝터 · LLM — 는 각각 성질이 달라서, 같은 규칙을 적용하면 안 됩니다.</p>
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>부분</th><th>기본 선택</th><th>왜</th></tr></thead>
+    <tbody>
+      <tr><td>비전 인코더</td><td>동결</td><td>학습이 불안정하고 파라미터도 큽니다. 도메인 갭이 크면 마지막 몇 블록만 열거나 LoRA를 겁니다.</td></tr>
+      <tr><td>프로젝터</td><td><b>통째로 학습</b></td><td>작고(수천만), 종종 랜덤 초기화 상태입니다 — LoRA를 걸 이유가 없습니다.</td></tr>
+      <tr><td>LLM</td><td><b>LoRA · 전 선형층</b></td><td>파라미터의 대부분이 여기 있고, 바꾸고 싶은 판단 능력도 여기 있습니다.</td></tr>
+      <tr><td>임베딩 · lm_head</td><td>동결</td><td>어휘 크기 때문에 무겁습니다. 새 특수 토큰을 넣을 때만 해당 행을 엽니다.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>프로젝터 줄이 특히 재미있습니다. 랜덤 초기화된 행렬은 <strong>LAB의 "잡음" 재료와 같습니다</strong> — 저랭크로 근사할 구조가 애초에 없습니다. 게다가 크기도 작아서 통째로 학습해도 옵티마이저 상태가 문제 되지 않습니다. <em>LoRA를 걸 대상은 "크고, 이미 잘 학습된" 행렬입니다.</em></p>
+  <p>순서도 2장의 2단계 학습을 그대로 물려받습니다. 프로젝터를 새로 붙였거나 갈아 끼웠다면 <strong>먼저 프로젝터만</strong> 정렬시키고, 그다음에 LoRA를 열어야 합니다. 이미 정렬이 끝난 모델을 도메인에 맞추는 것이라면 한 번에 가도 됩니다.</p>
+
+  <h2>5. 하이퍼파라미터 — r · α · dropout · 학습률</h2>
+  <p><strong>r</strong>은 4~64가 실전 범위입니다. "올리면 항상 좋은가"에 대한 답은 <em>아니오</em>이고, 이유가 셋입니다. ① ΔW의 실제 랭크가 낮으면 남는 성분은 배울 것이 없어 잡음을 맞추기 시작합니다(과적합). ② 앞에서 본 α/r 스케일 때문에 높은 랭크에서 학습이 정체됩니다. ③ 메모리와 시간은 r에 비례해 그대로 늘어납니다. <strong>언더피팅이 확인되기 전에는 r을 올리지 말고 대상 모듈부터 넓히십시오.</strong></p>
+  <p><strong>α</strong>는 앞서 말한 대로 성능 손잡이가 아닙니다. α/r을 1~2 근처로 두는 관행이 널리 쓰이고, r을 바꿀 때는 α도 같이 바꿔 <em>비율을 유지</em>하는 것이 요점입니다.</p>
+  <p><strong>dropout</strong>은 어댑터 입력에 걸립니다. 데이터가 적을수록 의미가 커서 0.05~0.1이 흔합니다. 데이터가 충분하면 0으로 두어도 무방합니다.</p>
+  <p><strong>학습률</strong>이 가장 자주 틀리는 지점입니다. LoRA는 전체 파인튜닝의 관행값(1e-5 수준)보다 <strong>10~100배 높은</strong> 1e-4~3e-4 근처를 씁니다. 파라미터가 적고 B가 0에서 출발하니 세게 밀지 않으면 움직이지 않습니다. 전체 파인튜닝 설정을 그대로 가져와 "LoRA는 학습이 안 된다"고 결론 내리는 실수가 이 한 줄에서 나옵니다.</p>
+  <p>더 나아가 Hayou 등(2024)은 A와 B에 <em>같은</em> 학습률을 쓰는 것 자체가 최적이 아니며, <strong>B 쪽을 더 크게</strong>(대략 십수 배) 두면 수렴이 빨라진다고 보였습니다(LoRA+). 두 행렬이 구조적으로 대칭이 아니라는 사실 — 하나는 랜덤에서, 하나는 0에서 출발합니다 — 이 여기서 다시 나타납니다.</p>
+
+  <h2>6. QLoRA — 베이스를 4비트로 눕히기</h2>
+  <p>LoRA로 옵티마이저 상태를 지워도 <strong>가중치 자체는 그대로 남습니다.</strong> 7B라면 bf16으로 12.5GB, 13B라면 24GB입니다. 학습하지도 않을 행렬이 메모리의 대부분을 차지하는 상황이 됩니다.</p>
+  <p>QLoRA(2023)의 답은 단순합니다 — <strong>어차피 갱신하지 않을 거라면 4비트로 눕혀 두자.</strong> 순전파에서 필요한 블록만 잠깐 되풀어(dequantize) 쓰고 버립니다. 어댑터는 계속 16비트로 학습합니다. 세 가지 부품이 들어갑니다.</p>
+  <ul>
+    <li><strong>NF4</strong> — 정규분포를 따르는 가중치에 맞춰 양자화 구간을 배치한 4비트 데이터 타입입니다. 같은 4비트라도 균등 배치보다 오차가 작습니다.</li>
+    <li><strong>이중 양자화</strong> — 양자화 상수 자체를 다시 양자화합니다. 파라미터당 약 0.13비트를 더 아껴, 실효 비용이 <span class="tok v">약 4.13비트/파라미터</span>가 됩니다.</li>
+    <li><strong>페이징 옵티마이저</strong> — 시퀀스가 긴 배치에서 메모리가 순간적으로 튈 때 옵티마이저 상태를 CPU로 밀어냅니다. OOM으로 죽는 대신 느려집니다.</li>
+  </ul>
+  <p>결과는 인상적이었습니다. 65B 모델을 <strong>48GB 가속기 한 장</strong>에서 파인튜닝하면서 16비트 파인튜닝의 성능을 유지했습니다. 개인이 손댈 수 있는 모델 크기의 상한이 하룻밤에 바뀐 사건이었습니다.</p>
+  <p>대가도 분명합니다. <strong>느려집니다</strong> — 매 순전파마다 되푸는 비용이 붙습니다. 그리고 양자화 오차가 이미 W<sub>0</sub>에 들어가 있으므로 어댑터가 <em>과제 적응과 양자화 보정을 동시에</em> 떠안게 됩니다. LoftQ 같은 후속 연구가 초기화 단계에서 그 오차를 미리 상쇄하려는 것이 이 때문입니다.</p>
+
+  <div class="lab">
+    <div class="lab-tag">LAB 6-2 · 메모리 산수</div>
+    <h3>학습 메모리 계산기</h3>
+    <p class="hint">같은 모델을 세 방식으로 학습할 때 메모리가 어떻게 나뉘는지 봅니다. 위 막대는 <b>선택한 설정</b>의 네 덩어리, 아래 막대는 <b>세 방식의 총합 비교</b>(점선은 흔한 가속기 용량)입니다. <b>먼저 7B급 · 전체 파인튜닝을 눌러 보고, 그다음 LoRA와 QLoRA로 옮겨 보세요.</b></p>
+    <div class="row">
+      <div class="ctl" style="min-width:250px">
+        <div>
+          <label>모델</label>
+          <div class="seg" id="mm_model">
+            <button type="button" data-model="2b">2B</button>
+            <button type="button" data-model="4b">4B</button>
+            <button type="button" data-model="7b" class="sel">7B</button>
+            <button type="button" data-model="13b">13B</button>
+          </div>
+        </div>
+        <div>
+          <label>학습 방식</label>
+          <div class="seg" id="mm_method">
+            <button type="button" data-method="full">전체</button>
+            <button type="button" data-method="lora" class="sel">LoRA</button>
+            <button type="button" data-method="qlora">QLoRA</button>
+          </div>
+        </div>
+        <div>
+          <label>베이스 정밀도</label>
+          <div class="seg" id="mm_prec">
+            <button type="button" data-prec="fp16" class="sel">fp16</button>
+            <button type="button" data-prec="int8">int8</button>
+            <button type="button" data-prec="nf4">4bit</button>
+          </div>
+        </div>
+        <div>
+          <label>LoRA 대상</label>
+          <div class="seg" id="mm_target">
+            <button type="button" data-target="qv">q · v</button>
+            <button type="button" data-target="attn">어텐션</button>
+            <button type="button" data-target="all" class="sel">전 선형층</button>
+          </div>
+        </div>
+        <div><label for="mm_r">랭크 <b id="mm_rv">r = 16</b></label>
+          <input type="range" id="mm_r" min="0" max="5" step="1" value="2"></div>
+        <div><label for="mm_seq">시퀀스 길이 <b id="mm_seqv">2,048 토큰</b></label>
+          <input type="range" id="mm_seq" min="0" max="4" step="1" value="2"></div>
+        <div><label for="mm_batch">배치 <b id="mm_bv">1개</b></label>
+          <input type="range" id="mm_batch" min="1" max="8" step="1" value="1"></div>
+        <label style="font-size:13px;color:var(--tx2)">
+          <input type="checkbox" id="mm_ckpt" checked>그래디언트 체크포인팅
+        </label>
+      </div>
+      <div class="ctl" style="min-width:260px">
+        <div id="mm_bars"></div>
+        <div>
+          <label style="margin-bottom:2px">세 방식 총합 비교</label>
+          <div id="mm_cmp"></div>
+        </div>
+        <div class="mmlegend">
+          <span><i style="background:var(--vis)"></i>가중치</span>
+          <span><i style="background:var(--lang)"></i>그래디언트</span>
+          <span><i style="background:var(--bad)"></i>옵티마이저</span>
+          <span><i style="background:var(--tx3)"></i>활성화</span>
+        </div>
+        <div class="stat">
+          학습 파라미터 <b id="mm_train">–</b> <span id="mm_pct">–</span><br>
+          합계 <span id="mm_total">–</span><br>
+          들어가는 카드 <span id="mm_fit">–</span>
+        </div>
+        <p class="hint" style="margin:0;color:var(--tx3);font-size:12px" id="mm_note"></p>
+      </div>
+    </div>
+    <p class="hint" style="margin:14px 0 0" id="mm_verdict"></p>
+    <p class="hint" style="margin:6px 0 0;color:var(--tx3)">근거: 혼합정밀 AdamW = 파라미터당 16바이트(ZeRO), NF4 + 이중 양자화 ≈ 4.13비트/파라미터(QLoRA), 층당 활성화 = s·b·h·(34 + 5·a·s/h)바이트, 재계산 시 2·s·b·h(Korthikanti 등). 언어부만 세었고 GQA·FlashAttention은 반영하지 않았습니다 — <b>자릿수 감각용</b>입니다. 전체 파인튜닝은 정의상 fp16, QLoRA는 4bit로 고정됩니다.</p>
+  </div>
+
+  <p>슬라이더를 몇 번 움직이면 네 가지가 손에 남습니다.</p>
+  <ol>
+    <li><strong>7B 전체 파인튜닝은 약 100GB</strong>입니다. 그중 75GB가 옵티마이저 상태입니다.</li>
+    <li><strong>LoRA로 바꾸면 그 75GB가 1GB 아래로 사라집니다.</strong> 학습 파라미터는 전체의 0.6% 정도입니다.</li>
+    <li><strong>그런데 가중치 12.5GB는 그대로 남습니다.</strong> QLoRA가 여기를 3GB대로 눕혀 24GB 카드 한 장 안으로 밀어 넣습니다.</li>
+    <li><strong>체크포인팅을 끄면 전부 무너집니다.</strong> 활성화가 28GB로 부풀어, QLoRA를 써도 32GB가 됩니다. LoRA는 활성화를 아껴 주지 않습니다 — 앞서 말한 그대로입니다.</li>
+  </ol>
+  <p>마지막 항목이 실무에서 가장 자주 걸립니다. LoRA로 바꿨는데 OOM이 그대로라면 범인은 대개 <strong>활성화</strong>입니다. 그리고 VLM에서 시퀀스 길이는 1장에서 본 시각 토큰 수가 직접 결정합니다 — <em>해상도를 올린 대가가 학습 메모리로 돌아옵니다.</em></p>
+
+  <h2>7. 병합과 서빙 — 어댑터를 갈아 끼우다</h2>
+  <p>학습이 끝나면 선택지가 둘입니다.</p>
+  <p><strong>병합(merge)</strong>하면 W' = W<sub>0</sub> + (α/r)BA를 한 번 계산해 원래 가중치 자리에 덮어씁니다. 결과 모델은 원본과 <em>형상이 완전히 같습니다</em>. 서빙 코드도, 추론 지연도 그대로입니다. LoRA가 층을 새로 끼워 넣는 방식(Houlsby 등의 원조 어댑터)과 갈라지는 결정적 지점이 여기입니다 — 병렬로 붙였기 때문에 더해서 없앨 수 있습니다.</p>
+  <p><strong>병합하지 않으면</strong> 층마다 작은 행렬곱 두 개가 매번 더 붙습니다. 그 대신 얻는 것이 큽니다.</p>
+  <ul>
+    <li><strong>어댑터 교체</strong> — 베이스는 메모리에 한 벌만 두고 어댑터만 갈아 끼웁니다. 어댑터 파일은 보통 수십 MB입니다. LoRA 논문은 175B 모델의 체크포인트가 350GB에서 <strong>35MB</strong>로 줄었다고 보고했습니다. 실험을 수십 개 굴리고 되돌리는 일이 완전히 다른 작업이 됩니다.</li>
+    <li><strong>다중 어댑터 동시 서빙</strong> — 서로 다른 어댑터를 요구하는 요청들을 <em>한 배치에</em> 묶을 수 있습니다. 베이스 행렬곱은 공유하고 어댑터 부분만 요청별로 다르게 계산하는 방식으로, S-LoRA 계열은 가속기 한 장에서 수천 개 어댑터를 서빙합니다.</li>
+  </ul>
+  <p>두 가지 함정을 기억해 두면 좋습니다.</p>
+  <p><strong>4비트 베이스에는 깨끗하게 병합되지 않습니다.</strong> 16비트 어댑터를 4비트 가중치에 더한 뒤 다시 4비트로 재양자화하면 그 과정에서 오차가 생깁니다. QLoRA로 학습한 어댑터는 보통 <em>되푼 16비트 베이스</em>에 병합하거나, 아예 병합하지 않고 서빙합니다.</p>
+  <p><strong>여러 어댑터를 한꺼번에 병합하면 서로 간섭합니다.</strong> 두 어댑터의 ΔW를 그냥 더하는 것은 두 과제를 동시에 잘하게 만드는 것과 다릅니다. 과제가 뚜렷이 다르면 따로 두고 요청 단위로 라우팅하는 편이 안전합니다.</p>
+
+  <h2>8. 그래도 전체 파인튜닝이 맞을 때</h2>
+  <p>LoRA가 기본값이 되었다고 해서 항상 정답인 것은 아닙니다. 두 경우에는 전체 파인튜닝을 먼저 고려하십시오.</p>
+  <p><strong>모델이 작을 때.</strong> LAB에서 2B급을 골라 전체 파인튜닝을 눌러 보면 40GB 안쪽입니다 — 카드 한 장으로 충분합니다. 이 체급에서는 LoRA로 얻는 메모리 이득이 크지 않은 반면, 저랭크 제약이 성능의 상한을 눌러 손해가 될 수 있습니다. 온디바이스를 노리는 소형 VLM들이 전체 파인튜닝을 그대로 쓰는 이유입니다(12장).</p>
+  <p><strong>배워야 할 것이 정말 많을 때.</strong> 새 언어, 새 도메인의 대규모 계속학습처럼 ΔW가 더 이상 저랭크가 아닌 경우입니다. LAB의 "잡음" 재료가 그 상황의 그림입니다 — 압축할 구조가 없으면 압축은 손실일 뿐입니다.</p>
+  <div class="note">
+    <b>고르는 순서.</b> ① 모델이 4B 이하이고 카드가 넉넉하면 → 전체 파인튜닝부터. ② 그 외에는 LoRA 전 선형층 · r = 16 · α/r = 2 · lr 2e-4로 시작. ③ 가중치가 메모리에 안 들어가면 → QLoRA. ④ 성능이 부족하면 <em>먼저 대상 모듈과 데이터를 의심하고</em>, 그다음에 r을 올립니다.
+  </div>
+  <p><strong>한 줄 정리</strong> — LoRA는 "모든 층을 깊이 방향으로는 전부, 폭 방향으로는 아주 얇게" 여는 방법입니다. 검출기에서 헤드만 열던 습관을 90도 돌려놓은 셈입니다.</p>
+
+  <h2>9. 확인 문제</h2>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 6-1</div>
+    <p class="q">LoRA는 A를 가우시안, B를 0으로 초기화합니다. 안전을 위해 <b>A와 B를 모두 0</b>으로 두면 어떻게 될까요?</p>
+    <div class="opts" id="q1">
+      <button type="button" data-a="0">더 안전합니다 — ΔW = 0에서 출발하는 것은 같고, 랜덤성이 없으니 재현성이 좋아집니다</button>
+      <button type="button" data-a="1">A와 B의 그래디언트가 모두 0이 되어 어댑터가 영원히 학습되지 않습니다</button>
+      <button type="button" data-a="0">B만 0일 때보다 수렴이 느려지지만 결국 같은 지점에 도달합니다</button>
+    </div>
+    <div class="expl" id="e1">A의 그래디언트에는 Bᵀ가, B의 그래디언트에는 Aᵀ가 곱해집니다. 둘 다 0이면 <b>양쪽 모두 0</b>이라 한 스텝도 움직이지 않습니다. 대칭을 깨려면 정확히 한쪽만 0이어야 하고, 0인 쪽을 B로 두는 이유는 그래야 시작 시점의 모델이 원본과 완전히 같아지기 때문입니다.</div>
+  </div>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 6-2</div>
+    <p class="q">q·v 두 행렬에만 r = 16으로 LoRA를 걸었는데 성능이 부족합니다. 학습 파라미터 예산을 두 배로 늘릴 수 있다면, 무엇을 먼저 시도할까요?</p>
+    <div class="opts" id="q2">
+      <button type="button" data-a="0">같은 q·v에 r을 32로 올립니다 — 랭크가 높을수록 표현력이 크기 때문입니다</button>
+      <button type="button" data-a="1">r은 그대로 두고 대상을 MLP까지 넓힙니다 — 어느 모듈에 붙이느냐가 랭크보다 크게 작용합니다</button>
+      <button type="button" data-a="0">비전 인코더를 전부 해동합니다 — 시각 특징이 병목이기 때문입니다</button>
+    </div>
+    <div class="expl" id="e2">QLoRA 저자들은 전체 파인튜닝을 따라잡는 데 결정적이었던 것은 랭크가 아니라 <b>모든 선형층에 어댑터를 다는 것</b>이었다고 보고했습니다. LoRA 원 논문도 같은 예산이면 한 행렬에 몰아주기보다 <b>나눠 붙이는</b> 편이 낫다고 했습니다. 규칙은 "얇게, 대신 넓게"입니다. 비전 인코더 해동은 예산이 훨씬 크게 드는 별개의 결정입니다.</div>
+  </div>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 6-3</div>
+    <p class="q">전체 파인튜닝에서 LoRA로 바꿨는데 OOM이 그대로입니다. 가장 먼저 의심할 곳은 어디일까요?</p>
+    <div class="opts" id="q3">
+      <button type="button" data-a="0">LoRA 어댑터의 파라미터 수 — r을 낮추면 해결됩니다</button>
+      <button type="button" data-a="1">활성화 메모리 — LoRA는 옵티마이저 상태를 지울 뿐 역전파는 여전히 네트워크 전체를 통과합니다</button>
+      <button type="button" data-a="0">동결된 베이스 가중치의 그래디언트 — 동결해도 그래디언트 버퍼는 그대로 잡힙니다</button>
+    </div>
+    <div class="expl" id="e3">아래층 어댑터까지 학습 신호를 보내려면 역전파가 동결된 층들을 <b>그대로 타고 내려가야</b> 합니다. 그래서 활성화 메모리와 스텝당 시간은 거의 그대로입니다. LAB 6-2에서 체크포인팅을 끄면 7B·2,048토큰 기준 활성화만 28GB로 부풉니다 — 어댑터 자체는 수십 MB라 r을 낮춰도 달라지는 것이 없습니다. 동결된 파라미터에는 그래디언트 버퍼가 잡히지 않습니다.</div>
+  </div>
+
+  <div class="refs">
+    <h2>더 읽을거리</h2>
+    <ol>
+      <li>Hu et al., <a href="https://arxiv.org/abs/2106.09685">LoRA: Low-Rank Adaptation of Large Language Models</a>, ICLR 2022 — ΔW = BA, α/r, 어느 행렬에 붙일 것인가, 그리고 병합해도 지연이 늘지 않는다는 논지.</li>
+      <li>Aghajanyan et al., <a href="https://arxiv.org/abs/2012.13255">Intrinsic Dimensionality Explains the Effectiveness of Language Model Fine-Tuning</a>, ACL 2021 — "ΔW의 랭크가 낮다"는 가설의 근거.</li>
+      <li>Dettmers et al., <a href="https://arxiv.org/abs/2305.14314">QLoRA: Efficient Finetuning of Quantized LLMs</a>, NeurIPS 2023 — NF4 · 이중 양자화 · 페이징 옵티마이저, 그리고 "r보다 대상 모듈".</li>
+      <li>Rajbhandari et al., <a href="https://arxiv.org/abs/1910.02054">ZeRO</a>, SC 2020 — 혼합정밀 Adam의 파라미터당 16바이트가 어디서 나오는지.</li>
+      <li>Korthikanti et al., <a href="https://arxiv.org/abs/2205.05198">Reducing Activation Recomputation in Large Transformer Models</a>, MLSys 2023 — LAB 6-2가 쓰는 활성화 메모리 공식.</li>
+      <li>Biderman et al., <a href="https://arxiv.org/abs/2405.09673">LoRA Learns Less and Forgets Less</a>, TMLR 2024 — LoRA가 뒤처지는 조건과, 대신 얻는 망각 저항성.</li>
+      <li>변형 3종 — Kalajdzievski, <a href="https://arxiv.org/abs/2312.03732">rsLoRA</a>(α/√r 스케일) · Liu et al., <a href="https://arxiv.org/abs/2402.09353">DoRA</a>(크기와 방향의 분해) · Hayou et al., <a href="https://arxiv.org/abs/2402.12354">LoRA+</a>(A와 B에 다른 학습률).</li>
+      <li>Houlsby et al., <a href="https://arxiv.org/abs/1902.00751">Parameter-Efficient Transfer Learning for NLP</a>, ICML 2019(층을 끼워 넣는 원조 어댑터) · Sheng et al., <a href="https://arxiv.org/abs/2311.03285">S-LoRA</a>, MLSys 2024(어댑터 수천 개 동시 서빙).</li>
+    </ol>
+  </div>
+
+  <div class="next">
+    이전 장 — <a href="05.html">05 제로샷 검출의 하한선</a><br>
+    다음 장 — <a href="07.html"><b>07 데이터 만들기 — instruction</b></a>: 어댑터를 어디에 붙일지는 정했습니다. 이제 그 안에 무엇을 흘려보낼 것인가 — LoRA의 성패는 대개 랭크가 아니라 데이터에서 갈립니다.
+  </div>
+
+  <footer>VLM 워크북 · 개인 학습 노트 · 인터랙티브 실습은 전부 브라우저 안에서 돕니다.</footer>
+</main>
+</div>
+
+<script defer src="../assets/js/site.js"></script>
+<script defer src="../assets/js/labs/ch06-lowrank.js"></script>
+<script defer src="../assets/js/labs/ch06-memory.js"></script>
+</body>
+</html>

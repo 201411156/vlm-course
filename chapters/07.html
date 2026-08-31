@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>07 데이터 만들기 — instruction — VLM 워크북</title>
+<meta name="description" content="검출 라벨을 대화형 instruction 데이터로 바꾸는 법. 부정 샘플, 답변 형식 고정, 누수와 중복, 합성 데이터의 검증 루프까지 직접 만들어 봅니다.">
+<script>try{var t=localStorage.getItem('vlmwb_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="../assets/css/base.css">
+<style>
+/* 7장 전용 — 데이터 빌더 / 누수 탐지 카드 */
+.jsonbox{margin-top:18px}
+.jsonbox pre{max-height:290px;overflow:auto;margin:6px 0 0}
+.kv{font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--tx3);letter-spacing:.04em}
+.kv b{color:var(--vis)}
+.chk{list-style:none;padding:0;margin:8px 0 0;font-size:13px;max-width:none}
+.chk li{display:flex;gap:9px;align-items:flex-start;margin:6px 0;color:var(--tx2);line-height:1.65}
+.chk li .m{font-family:'IBM Plex Mono',monospace;font-weight:600;flex:none;width:12px;text-align:center}
+.chk li.ok .m{color:var(--ok)}
+.chk li.warn .m{color:var(--lang)}
+.chk li.bad .m{color:var(--bad)}
+.dist{display:flex;flex-direction:column;gap:8px;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--tx2)}
+.dist .lb{display:flex;justify-content:space-between}
+.dist .b{display:flex;height:7px;border-radius:4px;background:var(--panel2);overflow:hidden;margin-top:3px}
+.dist .b i{display:block;height:100%}
+.chkbox{display:flex;flex-direction:column;gap:7px}
+.chkbox label{font-size:13px;color:var(--tx2);margin:0;display:flex;align-items:center}
+input[type=range]:disabled{opacity:.38}
+.thumbrow{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-bottom:12px;
+  padding-left:52px;position:relative}
+.thumbrow .tag{font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.12em;
+  color:var(--tx3);position:absolute;left:0;top:24px}
+.thumb{border:2px solid transparent;border-radius:7px;padding:2px;line-height:0;text-align:center}
+.thumb.leak{border-color:var(--bad);background:var(--panel2)}
+.thumb canvas{border-radius:4px}
+.thumb .cap{display:block;font-family:'IBM Plex Mono',monospace;font-size:10px;
+  color:var(--tx3);line-height:1.7;padding-top:2px}
+.thumb.leak .cap{color:var(--bad)}
+#lk_out b{font-size:inherit;color:var(--tx)}
+@media (max-width:760px){
+  .thumbrow{padding-left:0;padding-top:15px}
+  .thumbrow .tag{top:0}
+  .jsonbox pre{max-height:220px}
+}
+</style>
+</head>
+<body data-chapter="07">
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+<div class="wrap">
+<nav class="rail" aria-label="목차"></nav>
+
+<main id="main">
+  <div class="eyebrow">CHAPTER 07</div>
+  <h1>데이터 만들기 — instruction</h1>
+  <p class="lede">6장까지는 모델 쪽만 만졌습니다. 이제 파일 하나를 만듭니다. 그런데 이 파일에는 이상한 성질이 있습니다 — <b>거기에 적은 문장이 곧 모델의 말버릇이 됩니다.</b> 같은 이미지, 같은 박스, 같은 정보를 담고도 어떻게 적느냐에 따라 완전히 다른 모델이 나옵니다. 이 장은 그 "어떻게"에 관한 것입니다.</p>
+
+  <h2>1. 라벨의 자료형이 바뀝니다</h2>
+  <p>검출 데이터셋에서 정답은 숫자입니다. <code>image.jpg</code> 옆에 <code>image.txt</code>가 있고, 그 안에는 <code>class cx cy w h</code>가 줄 단위로 적혀 있습니다. 라벨러가 박스를 두 픽셀 크게 그렸다면 IoU가 조금 깎일 뿐, 손실 함수가 그 어긋남을 <em>부드럽게</em> 받아 줍니다. 정답이 기하이기 때문입니다.</p>
+  <p>VLM 학습 데이터에서 정답은 <strong>문장</strong>입니다. 손실은 토큰 단위 크로스엔트로피이므로, 답변 문장의 <em>글자 하나하나가</em> 학습 목표입니다. 그래서 이런 일이 벌어집니다.</p>
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>같은 GT</th><th>적어 넣은 정답 문장</th><th>학습된 모델의 행동</th></tr></thead>
+    <tbody>
+      <tr><td rowspan="3">자동차 1대<br><span class="tok v">[312,410,468,690]</span></td>
+          <td><code>예</code></td><td>한 글자로 판정합니다. 파싱이 자명합니다.</td></tr>
+      <tr><td><code>네, 자동차가 한 대 보입니다.</code></td><td>친절하지만 매번 문장을 씁니다. 파서가 필요해집니다.</td></tr>
+      <tr><td><code>[312,410,468,690]</code></td><td>좌표를 말합니다. 존재 질문에도 좌표로 답하려 듭니다.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>비전에서는 <strong>무엇을 라벨링할지</strong>만 정하면 되었습니다. VLM에서는 <strong>어떻게 말할지</strong>까지 정해야 합니다. 그리고 후자는 사양서가 아니라 데이터 파일이 정합니다 — 사양서에 "짧게 답한다"라고 적어 두어도, 파일에 긴 문장이 들어 있으면 모델은 길게 말합니다.</p>
+  <p>다행히 출발점은 이미 손에 있습니다. 여러분의 검출 라벨은 <strong>질문과 답을 자동으로 만들어낼 수 있는 구조화된 사실</strong>입니다. 이 장의 절반은 그 변환이고, 나머지 절반은 변환만으로는 절대 생기지 않는 것 — 부정 샘플, 형식 일관성, 누수 없는 분할 — 을 채워 넣는 일입니다.</p>
+
+  <h2>2. 대화 한 덩어리의 해부</h2>
+  <p>형식 자체는 시시할 만큼 단순합니다. 샘플 하나는 <strong>이미지 한 장 + 턴 몇 개</strong>입니다.</p>
+  <pre><code>{
+  "id": "syn_000041",
+  "image": "scenes/000041.png",
+  "conversations": [
+    { "from": "system", "value": "이미지를 보고 질문에 답합니다. 존재 질문에는 \"예\" 또는 \"아니오\"로만 답합니다." },
+    { "from": "human",  "value": "&lt;image&gt;\n이 장면에 자전거가 있습니까?" },
+    { "from": "gpt",    "value": "아니오" }
+  ]
+}</code></pre>
+  <p>세 역할의 성격이 서로 다르다는 점이 중요합니다.</p>
+  <ul>
+    <li><strong>system</strong> — 행동 규약입니다. 답변 형식, 좌표 표기법, 모르는 것에 대한 태도를 여기에 적습니다. 이 문자열은 <em>학습 때와 추론 때가 글자 단위로 같아야</em> 합니다.</li>
+    <li><strong>human</strong> — 질문과 <strong>이미지가 놓일 자리</strong>입니다.</li>
+    <li><strong>gpt</strong>(assistant) — <strong>손실이 걸리는 유일한 턴</strong>입니다. 나머지 토큰은 보통 −100으로 마스킹되어 학습에서 제외됩니다. 즉 모델은 질문을 <em>배우는</em> 것이 아니라 <strong>질문에 대한 답만</strong> 배웁니다.</li>
+  </ul>
+  <p><span class="tok l">&lt;image&gt;</span> 플레이스홀더는 그냥 표식이 아닙니다. 학습 스크립트가 이 자리를 <strong>1장에서 본 시각 토큰 수백 개로 치환</strong>합니다. 그래서 두 가지가 따라옵니다. 첫째, <em>위치</em>가 의미를 가집니다 — 질문 앞에 두면 "보고 나서 묻는" 순서가 되고, 뒤에 두면 그 반대가 됩니다. 둘째, <em>개수</em>가 정확히 맞아야 합니다. 이미지 두 장을 주면서 플레이스홀더를 하나만 적으면, 운이 좋으면 예외가 나고 운이 나쁘면 <strong>이미지를 무시한 채 텍스트만으로 조용히 학습됩니다</strong>.</p>
+  <p>필드 이름은 도구마다 다릅니다. <code>{"from","value"}</code>를 쓰는 계열이 있고 <code>{"role","content"}</code>를 쓰는 계열이 있지만, 구조는 같습니다. 어느 쪽이든 최종적으로는 모델별 <strong>chat template</strong>을 통과해 특수 토큰이 붙은 하나의 긴 문자열이 됩니다 — 같은 JSON이라도 모델이 바뀌면 실제 학습되는 문자열은 달라집니다.</p>
+
+  <div class="note">
+    <b>검출 엔지니어를 위한 대응표.</b> <code>images/ + labels/</code> → 한 줄에 한 샘플인 JSONL 한 파일. <code>클래스 id</code> → 문장 속 클래스 <em>이름</em>(오탈자까지 그대로 학습됩니다). <code>letterbox 좌표 보정</code> → 좌표 정규화 규약(3절). <code>data.yaml</code> → system 프롬프트. 마지막 대응이 특히 낯선데, 실제로 그렇습니다 — 데이터셋의 메타 규약이 <strong>학습 샘플 안에 문자열로 들어갑니다</strong>.
+  </div>
+
+  <h2>3. 기하 라벨을 대화로 — 자동 변환</h2>
+  <p>박스 하나에서 최소 세 가지 질문형이 공짜로 나옵니다. 네 번째는 박스가 <em>없다</em>는 사실에서 나옵니다.</p>
+  <ol>
+    <li><strong>존재</strong> — "X가 있습니까?" → <code>예</code> / <code>아니오</code>. GT의 클래스 집합만 있으면 됩니다.</li>
+    <li><strong>위치</strong> — "X는 어디에 있습니까?" → 좌표 문자열. 4장의 좌표 표기 규약을 그대로 따릅니다.</li>
+    <li><strong>개수</strong> — "X가 몇 개입니까?" → 정수. 인스턴스를 세면 끝입니다.</li>
+    <li><strong>부정</strong> — GT에 <em>없는</em> 클래스로 위 셋을 만들고 "아니오 / 없습니다 / 0"을 정답으로 둡니다. 4절에서 따로 다룹니다.</li>
+  </ol>
+  <p>변환에서 사고가 나는 지점은 거의 항상 <strong>좌표</strong>입니다. 정규화 정수 0~1000, 0~1 실수, 픽셀 절대값 — 무엇을 쓰든 상관없지만, 고른 하나를 <strong>데이터셋 전체에서 한 번도 어기지 않는 것</strong>이 정확도보다 먼저입니다. 그리고 system 프롬프트에 그 규약을 적어 두면, 나중에 "이 체크포인트가 어떤 좌표계를 말하는지" 잊어버리는 사고를 막을 수 있습니다.</p>
+  <p>가장 자주 나오는 버그는 이렇습니다. 라벨은 원본 1280×960에서 땄는데 학습 이미지는 448로 리사이즈해 놓고, 좌표는 원본 픽셀 그대로 적는 경우입니다. 검출에서 letterbox 오프셋을 빼먹는 것과 같은 실수인데, <strong>여기서는 훨씬 조용합니다</strong>. 손실은 잘 떨어집니다. 모델이 "이미지와 무관한 그럴듯한 숫자"를 외우는 데 성공하기 때문입니다. 아래 빌더에서 직접 재현해 보십시오.</p>
+
+  <div class="lab">
+    <div class="lab-tag">LAB 7-1 · 라벨을 대화로</div>
+    <h3>instruction 데이터 빌더</h3>
+    <p class="hint">왼쪽은 합성 장면과 GT 박스입니다(검출 라벨이라고 생각하십시오). 오른쪽 설정으로 <b>240개짜리 instruction 데이터셋</b>을 즉석에서 만들고, 아래에서 <b>샘플 JSON · 통계 · 포맷 검사기</b>를 봅니다. 실수 재현 스위치를 켜면 검사기가 무엇을 잡고 무엇을 못 잡는지 알 수 있습니다.</p>
+    <div class="row">
+      <div style="flex:0 0 auto">
+        <canvas id="db_scene" aria-label="합성 장면과 GT 박스"></canvas>
+        <div class="legend">
+          <span><i class="v"></i>GT 박스</span>
+          <span><i class="l"></i>이번 질문의 대상</span>
+        </div>
+        <div class="btns" style="margin-top:10px">
+          <button class="btn" id="db_prev" type="button">‹ 이전</button>
+          <button class="btn" id="db_next" type="button">다음 샘플 ›</button>
+        </div>
+      </div>
+      <div class="ctl">
+        <div>
+          <label>질문 템플릿</label>
+          <div class="chkbox">
+            <label><input type="checkbox" id="db_t_exist" checked>존재 — "X가 있습니까?"</label>
+            <label><input type="checkbox" id="db_t_loc" checked>위치 — "X는 어디에?"</label>
+            <label><input type="checkbox" id="db_t_count" checked>개수 — "X가 몇 개?"</label>
+            <label><input type="checkbox" id="db_t_neg">부정 — 없는 것을 묻기</label>
+          </div>
+        </div>
+        <div>
+          <label for="db_ratio">부정 샘플 비율 <b id="db_ratioV">0%</b></label>
+          <input type="range" id="db_ratio" min="0" max="80" step="5" value="0" disabled>
+        </div>
+        <div>
+          <label>좌표 포맷 <span style="color:var(--tx3)">(4장 규약)</span></label>
+          <div class="seg" id="db_fmt">
+            <button type="button" data-fmt="norm1000" class="sel">정수 0~1000</button>
+            <button type="button" data-fmt="norm01">0~1 실수</button>
+            <button type="button" data-fmt="pixel">픽셀</button>
+          </div>
+        </div>
+        <div>
+          <label>실수 재현</label>
+          <div class="chkbox">
+            <label><input type="checkbox" id="db_bug_img">&lt;image&gt; 플레이스홀더 누락</label>
+            <label><input type="checkbox" id="db_bug_coord">리사이즈 전 원본 좌표 사용</label>
+            <label><input type="checkbox" id="db_bug_fmt">답변 형식 혼재</label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="jsonbox">
+      <div class="kv">샘플 <b id="db_idx">#000</b> · <span id="db_meta"></span> · 손실은 <span class="tok l">gpt</span> 턴에만 걸립니다</div>
+      <pre><code id="db_json"></code></pre>
+    </div>
+
+    <div class="row" style="margin-top:18px">
+      <div class="ctl">
+        <label>데이터셋 통계</label>
+        <div class="stat" id="db_stat"></div>
+      </div>
+      <div class="ctl">
+        <label>클래스 분포 <span class="tok v">긍정</span> <span class="tok l">부정</span></label>
+        <div class="dist" id="db_dist"></div>
+      </div>
+    </div>
+
+    <div style="margin-top:18px">
+      <div class="kv">포맷 검사기</div>
+      <ul class="chk" id="db_check"></ul>
+    </div>
+
+    <p class="hint" style="margin:18px 0 0">
+      <b>무엇을 관찰할지.</b> ① 부정 템플릿을 끈 채로 통계를 보십시오 — 긍정 100%입니다. 이 데이터로 학습한 모델은 "아니오"를 한 번도 배우지 못합니다.
+      ② <b>리사이즈 전 원본 좌표</b>를 켜 보십시오. 포맷이 <b>정수 0~1000</b>이면 걸리는 것은 몇 건뿐입니다 — 1280×960 좌표의 대부분이 <em>우연히</em> 0~1000 안에 들어가기 때문입니다. 포맷을 <b>픽셀</b>(0~447)로 바꾸면 훨씬 많이 걸립니다. 그런데 어느 쪽이든 <b>걸리지 않은 나머지도 전부 틀린 좌표</b>입니다. 검사기는 <em>선언과 데이터의 불일치</em>만 볼 뿐, 그 숫자가 이미지의 어디를 가리키는지는 모릅니다.
+      ③ <b>답변 형식 혼재</b>를 켜면 존재 질문의 정답이 서술형으로 바뀝니다. 파서가 깨지기 전에 모델이 먼저 흔들립니다.
+    </p>
+  </div>
+
+  <h2>4. "없습니다"를 가르치기 — 부정 샘플</h2>
+  <p>2장 끝에서 미뤄 둔 문제가 여기서 돌아옵니다. 웹 캡션에는 <strong>부재가 없습니다</strong>. 아무것도 없는 사진에 캡션을 다는 사람이 없기 때문입니다. 그리고 사람이 만드는 instruction 데이터도 마찬가지입니다 — 이미지에 있는 것에 대해 질문을 만들지, 없는 것에 대해 질문을 만들 이유가 없습니다.</p>
+  <p>결과는 예측 가능합니다. 모델이 <strong>"예"를 기본값으로</strong> 배웁니다. POPE 연구가 이것을 정면으로 측정했고, 원인까지 짚었습니다 — <strong>instruction 데이터에 자주 등장하거나 이미지 속 물체와 자주 함께 나오는 물체일수록 환각됩니다.</strong> 환각은 신비한 현상이 아니라 <em>데이터의 공동 출현 통계를 그대로 되뇌는 것</em>입니다. 도로 사진 데이터에 자동차와 신호등이 늘 함께 나왔다면, 신호등이 없는 도로 사진에서도 모델은 신호등을 봅니다.</p>
+  <p>LRV-Instruction은 이 문제를 데이터 설계로 되받았습니다. 40만 건의 지시 안에 <strong>부정 지시</strong>를 세 층위로 넣었습니다 — ①존재하지 않는 물체 조작 ②존재하는 물체의 속성 조작 ③지식 조작. 그리고 실험 결론이 우리가 실무에서 쓸 수 있는 한 문장입니다: <strong>긍정과 부정의 비율이 균형 잡힐수록 모델이 견고해졌습니다.</strong></p>
+
+  <h3>4-1. 비율과 난이도, 두 개의 손잡이</h3>
+  <ul>
+    <li><strong>비율</strong> — 존재 판정에서 긍정:부정 1:1이 안전한 출발점입니다. 0%는 "무조건 예"를, 80%는 "무조건 아니오"를 만듭니다. LAB 7-1의 슬라이더를 양 끝까지 밀어 보면 검사기가 양쪽 다 경고합니다. 부정 비율은 데이터 사양이 아니라 <strong>튜닝해야 할 하이퍼파라미터</strong>로 보는 편이 맞습니다.</li>
+    <li><strong>난이도</strong> — 부정 클래스를 무작위로 고르면 너무 쉽습니다. "바다 사진에 코끼리가 있습니까"에서는 배울 것이 없습니다. 어려운 부정은 <em>그 장면에 있어도 이상하지 않은 클래스</em>에서 나옵니다 — 자동차가 있는 거리 사진에 없는 자전거, 사람이 있는 사진에 없는 개. LAB 7-1은 이 방식으로 부정 대상을 고릅니다.</li>
+  </ul>
+  <p>검증할 때도 짝을 맞춰야 합니다. 전체 정확도 하나만 보면 편향이 숨습니다. <strong>"예"에 대한 재현율과 "아니오"에 대한 재현율을 따로</strong> 보십시오 — 검출에서 FP와 FN을 따로 보던 습관 그대로입니다.</p>
+
+  <h2>5. 답변 형식을 고정하기</h2>
+  <p>같은 정보라도 답변 형식이 다르면 <strong>다른 파이프라인</strong>이 됩니다.</p>
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>형식</th><th>보기</th><th>강점</th><th>대가</th></tr></thead>
+    <tbody>
+      <tr><td>판정형(짧게)</td><td class="num">예 / 아니오 / 3</td>
+          <td>파싱이 자명하고 토큰이 짧습니다. 9장의 로짓 채점으로 바로 넘어갑니다.</td>
+          <td>근거가 남지 않습니다. 사람이 검수하기 어렵습니다.</td></tr>
+      <tr><td>서술형(길게)</td><td>왼쪽에 자전거 한 대가 세워져 있습니다.</td>
+          <td>근거와 맥락이 남습니다. 사람이 읽기 좋습니다.</td>
+          <td>정규식이 늘어나고 형식이 서서히 표류합니다.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>진짜 문제는 <strong>둘을 한 데이터셋에 섞을 때</strong> 생깁니다. LLaVA-1.5가 이 지점을 정확히 진단했습니다. 짧은 답과 자연스러운 대화를 함께 학습시키면, <code>Q: {질문} A: {답}</code> 같은 <em>모호한 프롬프트</em> 때문에 모델이 원하는 출력 형식을 알 수 없게 되고, 결국 <strong>자연스러운 대화에서까지 짧은 답으로 굳어버립니다</strong>.</p>
+  <p>해결책은 놀랄 만큼 단순했습니다. 짧은 답을 원하는 질문 뒤에 <strong>형식 지시문 한 줄</strong>을 붙였습니다 — <code>Answer the question using a single word or phrase.</code> 그러자 모델이 지시문에 따라 출력 길이를 조절하게 되었고, VQAv2를 학습에 넣는 것만으로 MME 점수가 809.6에서 1323.8로 올랐습니다. 형식을 <em>데이터로</em> 고정하는 대신 <strong>지시문으로</strong> 고정한 것입니다.</p>
+  <p>반대 방향의 실패도 기록되어 있습니다. Cambrian-1은 짧은 답 VQA를 지나치게 많이 넣으면 모델이 벤치마크는 잘 풀면서 대화 능력을 잃고 무뚝뚝하게 단답만 내놓는 현상을 관찰하고, 여기에 <strong>"answer machine phenomenon"</strong>이라는 이름을 붙였습니다. 해법은 같았습니다 — 단답이 필요한 질문에만 형식 지시문을 붙이자, 벤치마크 점수는 그대로인 채 대화 능력이 돌아왔습니다.</p>
+  <p>실무로 옮기면 규칙 셋이 됩니다.</p>
+  <ol>
+    <li><strong>형식 지시문과 답변 형식을 1:1로 묶으십시오.</strong> 그러면 추론할 때 지시문만 바꿔 형식을 고를 수 있습니다. 같은 체크포인트가 판정기도 되고 설명기도 됩니다.</li>
+    <li><strong>system 프롬프트를 학습과 추론에서 글자 단위로 동일하게</strong> 유지하십시오. 사소해 보이지만 실제 사고의 상당수가 여기서 납니다.</li>
+    <li><strong>파서는 먼저 실패하게</strong> 만드십시오. "예로 시작하면 참, 아니오로 시작하면 거짓, <em>그 외에는 예외</em>"가 옳습니다. 조용한 기본값(<code>else False</code>)은 형식 표류를 몇 주씩 숨깁니다.</li>
+  </ol>
+
+  <h2>6. 품질 — 노이즈·누수·다양성</h2>
+
+  <h3>6-1. 라벨 노이즈는 문장으로 번집니다</h3>
+  <p>검출에서 박스가 몇 픽셀 어긋나면 손실이 조금 커집니다. 문장에서는 클래스 하나가 잘못 붙으면 <strong>완전히 틀린 문장 한 줄</strong>이 됩니다. 게다가 자동 변환은 노이즈를 <strong>증폭</strong>합니다 — 라벨 한 건이 틀리면 그 이미지에서 만들어진 질문 서너 개가 전부 오답이 됩니다. 그래서 자동 변환 파이프라인은 검출 학습보다 라벨 품질 요구가 높아집니다.</p>
+  <p>더 고약한 것은 <strong>미라벨 객체</strong>입니다. GT에 없다는 이유로 "없습니다"를 정답으로 삼는데 실제로는 이미지에 있는 경우입니다. 검출에서 라벨 누락은 배경 페널티로 들어가 성능을 조금 갉아먹는 정도지만, 여기서는 모델에게 <strong>"저것은 없는 것"이라고 명시적으로 가르치게 됩니다.</strong> 라벨 누락률이 곧 <em>틀린 부정 샘플의 비율</em>이 되는 셈이니, 부정 샘플을 만들 계획이라면 라벨 완결성을 먼저 점검해야 합니다.</p>
+  <p>다만 모델이 몇 건의 오류에 곧바로 무너지지는 않습니다. LLaVA-1.5의 관찰이 흥미롭습니다 — 학습 데이터에 환각 섞인 상세 묘사가 일부 있었는데, 입력 해상도를 448²로 올리자 환각이 크게 줄었습니다. 저자들의 해석은 이렇습니다. <strong>모델의 시력이 데이터의 세밀함을 따라가지 못할 때</strong>, 그리고 그런 데이터가 충분히 많아질 때, 모델은 <em>환각하는 법을 배웁니다</em>. 라벨 상세도와 모델 능력 사이에 균형이 필요하다는 뜻이고, 3장의 해상도 논의와 곧장 이어집니다 — <strong>모델이 볼 수 없는 것을 적어 넣으면, 그것은 라벨이 아니라 환각 교습입니다.</strong></p>
+
+  <h3>6-2. 중복과 누수 — 검증 점수를 무의미하게 만드는 것</h3>
+  <p>영상에서 잘라낸 데이터의 고전적인 함정입니다. 30fps에서 연속 프레임은 사실상 같은 이미지인데 파일명은 다릅니다. 파일 목록을 무작위로 섞어 8:2로 나누면 <strong>train과 val에 같은 장면이 들어갑니다.</strong> 그러면 검증 점수는 일반화 성능이 아니라 암기 성능을 재게 되고, 더 나쁘게는 <em>여러 번 다시 재도 같은 거짓 점수가 안정적으로</em> 나옵니다.</p>
+  <p>규칙은 하나입니다. <strong>분할은 프레임이 아니라 장면·영상·촬영 단위로 합니다.</strong> 그리고 나눈 다음에는 확인해야 합니다. 텍스트 쪽에서는 오래된 기술이 있습니다 — n-gram과 MinHash로 near-duplicate를 걷어내면 언어 모델이 더 나아진다는 것이 이미 정리되어 있습니다. 이미지에는 <strong>지각 해시</strong>를 씁니다. 축소해 회색조로 만든 뒤 밝기 기준으로 비트열을 만들고, <strong>해밍 거리</strong>로 비교하면 됩니다. 리사이즈·노출 변화·약간의 이동에는 둔감하고 내용이 다르면 크게 벌어집니다.</p>
+  <p>벤치마크 수준에서도 같은 문제가 보고됩니다. MMStar는 여러 멀티모달 벤치마크의 샘플이 학습 코퍼스로 새어 들어갔을 가능성을 지적했습니다. 남의 벤치마크에서도 벌어지는 일이니, 직접 만든 검증셋에서 벌어지지 않을 이유가 없습니다.</p>
+
+  <div class="lab">
+    <div class="lab-tag">LAB 7-2 · 같은 장면 찾기</div>
+    <h3>누수 탐지 미니</h3>
+    <p class="hint">장면 8개를 각각 두 프레임씩 찍은 16장입니다(<b>A1</b>과 <b>A2</b>는 같은 장면의 다른 순간). 각 이미지를 16×16 회색조로 줄여 평균 해시 256비트를 만들고, val의 각 장에 대해 train 쪽 최소 해밍 거리 <b>d</b>를 표시합니다.</p>
+    <div class="row" style="margin-bottom:14px">
+      <div class="ctl" style="max-width:300px">
+        <div>
+          <label>분할 방식</label>
+          <div class="seg" id="lk_split">
+            <button type="button" data-split="random" class="sel">파일 단위 무작위</button>
+            <button type="button" data-split="scene">장면 단위</button>
+          </div>
+        </div>
+        <div>
+          <label for="lk_thr">누수 판정 임계 해밍 거리 <b id="lk_thrV">24</b></label>
+          <input type="range" id="lk_thr" min="0" max="80" step="2" value="24">
+        </div>
+      </div>
+      <div class="ctl">
+        <div class="stat" id="lk_out" style="line-height:1.75;font-family:inherit;font-size:13.5px"></div>
+      </div>
+    </div>
+    <div id="lk_grid"></div>
+    <p class="hint" style="margin:14px 0 0"><b>무엇을 관찰할지.</b> 무작위 분할에서 val 썸네일 아래 <b>d</b>가 20 아래로 찍힌 것들이 누수입니다 — 눈으로 train 쪽을 훑어보면 거의 같은 그림이 있습니다. <b>장면 단위</b>로 바꾸면 d가 한꺼번에 30 안팎으로 뜁니다. 임계값을 40 너머로 밀면 서로 다른 장면까지 "누수"로 잡히기 시작하는데, 그 지점이 이 방식의 한계입니다 — 해시는 <em>비슷함</em>을 잴 뿐 <em>같음</em>을 증명하지 않습니다. 실무에서는 해시로 후보를 좁힌 다음 사람이 확인합니다.</p>
+  </div>
+
+  <h3>6-3. 다양성 — 무엇이 다양해야 하는가</h3>
+  <p>질문 표현이 한 문장으로 고정되면 모델은 <strong>그 문장에만</strong> 반응합니다. 그래서 같은 뜻의 문장 여러 개를 돌려 씁니다(LAB 7-1이 문형 4개를 회전시킵니다). 다만 착시를 조심해야 합니다 — 장면 100개에 표현 20가지를 곱해 2,000샘플을 만들어도, <strong>시각적 다양성은 여전히 100입니다</strong>. 표현 회전은 언어 쪽 과적합을 막을 뿐, 새로운 시각 정보를 만들어내지 않습니다.</p>
+  <p>진짜 다양성은 데이터 <em>소스</em>에서 옵니다. Cambrian-1은 대규모 풀(Cambrian-10M)에서 소스 비율을 조정해 <strong>더 작은 큐레이션 셋(Cambrian-7M)</strong>을 만들었고, 300만 건을 덜어냈는데 평균 점수는 54.8에서 55.9로 <em>올랐습니다</em>. 같은 표에서 LLaVA의 665K 혼합은 40.7이었습니다. 규모도 중요하지만 <strong>어디서 온 데이터를 어떤 비율로 섞느냐</strong>가 그만큼 중요하다는 뜻입니다.</p>
+
+  <h2>7. 합성 데이터와 검증 루프</h2>
+  <p>사람이 158K개의 대화를 손으로 쓸 수는 없습니다. LLaVA의 답은 2장에서 이미 본 그것입니다 — <strong>이미지를 본 적 없는 텍스트 전용 GPT-4</strong>에게 COCO의 캡션과 박스 좌표를 텍스트로만 건네고 대화를 쓰게 했습니다. 핵심 발상은 <em>박스를 기호적 기술로 바꿔 언어 모델에 넘긴다</em>는 것이고, 여러분의 GT는 이미 그 재료입니다.</p>
+  <p>다음 세대는 이미지를 직접 보는 모델을 썼습니다. ShareGPT4V는 GPT4-Vision으로 고품질 캡션 <strong>100K</strong>를 모으고, 그것으로 캡셔너를 학습시켜 <strong>1.2M</strong>으로 늘렸습니다. 기존 SFT 데이터의 상세 캡션을 같은 양만큼 이 캡션으로 갈아 끼우기만 해도 LLaVA-7B의 MME가 222.8점 올랐습니다. <strong>비싼 모델로 씨앗을 만들고, 그 씨앗으로 싼 모델을 학습시켜 규모를 내는</strong> 이 2단계가 지금의 표준 레시피입니다.</p>
+  <p>대가도 분명합니다. 합성 데이터의 품질 상한은 <strong>생성기의 능력</strong>이고, 생성기가 보지 못하는 것은 데이터에도 없습니다. Molmo는 이 의존을 피하려고 사람이 이미지를 보며 <em>말로 설명한</em> 캡션을 모으는 길을 택했습니다.</p>
+  <p>그래서 검증 루프가 선택이 아닙니다.</p>
+  <ul>
+    <li><strong>GT와 자동 대조</strong> — 생성된 답 중 개수·존재·좌표처럼 <em>기계가 확인할 수 있는 부분</em>은 반드시 GT와 대조하십시오. 생성기가 "자동차 세 대"라고 썼는데 GT가 두 대면 그 샘플은 버립니다. 이 검사만으로도 상당량이 걸러집니다.</li>
+    <li><strong>사람 표본 검수</strong> — 100~200건을 무작위로 뽑아 눈으로 봅니다. 이 단계를 건너뛴 합성 데이터셋은 거의 항상 한 가지 <em>계통적</em> 오류를 품고 있고, 계통 오류는 통계로 잘 드러나지 않습니다.</li>
+    <li><strong>되먹임 주의</strong> — 자기 모델이 만든 데이터로 자기 모델을 반복 학습시키면 분포가 좁아집니다. 씨앗은 더 강한 모델이나 사람에게서 와야 합니다.</li>
+  </ul>
+  <p>합성 데이터가 무엇을 사 주는지에 대해서는 Vision-Flan의 분석이 가장 선명합니다. 저자들의 결론은 <strong>GPT-4 합성 데이터가 능력을 크게 늘려주기보다 응답을 사람이 선호하는 형식으로 조율한다</strong>는 것이었고, 그 목적이라면 <strong>1,000건 수준의 소량으로도 충분</strong>했습니다. 능력은 다양한 태스크(그들은 187개 태스크·166만 건의 사람 라벨 데이터를 모았습니다)에서 오고, 형식은 소량의 합성 데이터에서 옵니다 — 5절과 같은 이야기를 다른 각도에서 하고 있습니다.</p>
+
+  <h2>8. 크기 감각 — 몇 장이면 되는가</h2>
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>사례</th><th>규모</th><th>무엇을 얻었나</th></tr></thead>
+    <tbody>
+      <tr><td>LLaVA</td><td class="num">158K</td><td>멀티모달 대화 능력 자체(대화 58K · 상세묘사 23K · 복합추론 77K).</td></tr>
+      <tr><td>LLaVA-1.5</td><td class="num">SFT 665K<br>(전체 1.2M)</td><td>11개 벤치마크 SOTA. 8×A100 노드 하나로 약 하루.</td></tr>
+      <tr><td>ShareGPT4V</td><td class="num">100K → 1.2M</td><td>캡션 품질만 바꿔 MME +222.8(LLaVA-7B).</td></tr>
+      <tr><td>Vision-Flan</td><td class="num">1.66M + 1K</td><td>능력은 187개 태스크에서, 형식은 합성 1K에서.</td></tr>
+      <tr><td>Cambrian-1</td><td class="num">10M → 7M</td><td>덜어내고 비율을 맞추자 평균 54.8 → 55.9.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>표에서 읽어야 할 것은 절대 숫자가 아니라 <strong>기울기</strong>입니다.</p>
+  <ul>
+    <li><strong>만 단위</strong>에서 이미 형식과 태도가 바뀝니다. 모델이 "어떻게 답하는지"는 생각보다 훨씬 적은 데이터로 정해집니다.</li>
+    <li><strong>십만~백만 단위</strong>가 사 주는 것은 주로 <em>커버리지</em>입니다. 새로운 장면, 새로운 태스크, 새로운 질문 유형입니다.</li>
+    <li>그 위로는 <strong>수확이 급격히 체감합니다.</strong> LLaVA-1.5는 학습 혼합을 절반으로 줄여도 전체 성능의 98% 이상이 유지된다고 보고했고, Cambrian-1은 오히려 덜어낸 쪽이 좋았습니다.</li>
+  </ul>
+  <p>도메인 하나를 붙이는 상황이라면 출발점은 <strong>수천~수만</strong>입니다. 그리고 그 구간에서 성능을 가르는 것은 대개 양이 아닙니다 — ①부정 샘플이 있는가 ②형식이 일관적인가 ③분할에 누수가 없는가, 이 세 가지입니다. 공교롭게도 이 장의 4·5·6절이 정확히 그 셋입니다. 6장의 LoRA와 묶어 읽으면 결론은 하나로 모입니다. <strong>파라미터는 적게 열고, 데이터는 정확하게 만드는 것</strong> — 그것이 소규모 도메인 적응의 기본형입니다.</p>
+
+  <h2>9. 확인 문제</h2>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 7-1</div>
+    <p class="q">검출 GT에서 존재 판정 데이터를 자동 생성했는데, 정답이 전부 "예"입니다. 학습 후 가장 그럴듯한 증상은 무엇일까요?</p>
+    <div class="opts" id="q1">
+      <button type="button" data-a="0">"예"와 "아니오"를 반반씩 무작위로 답합니다 — 근거가 없으니 확률이 반씩입니다</button>
+      <button type="button" data-a="1">묻는 물체가 없어도 "예"라고 답합니다. 특히 학습 데이터에서 자주 함께 등장하던 물체일수록 심합니다</button>
+      <button type="button" data-a="0">존재 질문에 답하지 못하고 좌표를 출력합니다</button>
+    </div>
+    <div class="expl" id="e1">부정 샘플이 없으면 "아니오"는 학습 목표로 한 번도 등장하지 않습니다. 존재 질문이 사실상 <b>1지선다</b>가 되는 셈입니다. POPE는 이 편향을 측정하면서, <b>instruction 데이터에 자주 나오거나 이미지 속 물체와 자주 공존하는 물체일수록 환각된다</b>는 점까지 짚었습니다. 즉 모델은 이미지를 보는 대신 데이터의 공동 출현 통계를 되뇌는 것입니다. 반대로 부정 비율을 너무 높이면 "무조건 아니오" 모델이 나오므로, 균형(LRV-Instruction의 결론)이 답입니다.</div>
+  </div>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 7-2</div>
+    <p class="q">짧은 판정 답변과 긴 서술형 답변을 한 데이터셋에 섞어 학습시켰더니, 자유 대화에서까지 모델이 단답만 내놓습니다. LLaVA-1.5와 Cambrian-1이 공통으로 제시한 해법은 무엇일까요?</p>
+    <div class="opts" id="q2">
+      <button type="button" data-a="0">서술형 답변을 전부 제거하고 판정형으로 통일합니다</button>
+      <button type="button" data-a="1">원하는 출력 형식을 명시하는 지시문을 질문에 붙여, 형식을 데이터가 아니라 지시문으로 결정하게 합니다</button>
+      <button type="button" data-a="0">비전 인코더를 해동해 시각 특징이 답변 길이를 조절하도록 만듭니다</button>
+    </div>
+    <div class="expl" id="e2">LLaVA-1.5는 짧은 답을 원하는 질문 뒤에 <code>Answer the question using a single word or phrase.</code> 한 줄을 붙였습니다. 그러자 모델이 <b>지시문에 따라 형식을 골라</b> 출력하게 되었고, 두 종류의 데이터가 서로를 오염시키지 않게 되었습니다. Cambrian-1은 같은 증상을 "answer machine phenomenon"이라 부르고 동일한 처방으로 대화 능력을 되찾았습니다. 형식을 지시문에 묶어 두면 <b>같은 체크포인트로 추론 때 형식을 고를 수 있다</b>는 실무적 이득도 따라옵니다.</div>
+  </div>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 7-3</div>
+    <p class="q">영상에서 뽑은 프레임 10만 장을 파일 목록 기준으로 무작위 8:2 분할했습니다. 검증 정확도가 매우 높게 나오고 재실행해도 안정적입니다. 가장 먼저 의심할 것은 무엇일까요?</p>
+    <div class="opts" id="q3">
+      <button type="button" data-a="0">검증셋이 너무 작아 분산이 큰 것이므로, val 비율을 늘려야 합니다</button>
+      <button type="button" data-a="0">점수가 안정적이라는 것은 누수가 없다는 신호이므로 문제가 없습니다</button>
+      <button type="button" data-a="1">연속 프레임이 train과 val에 나뉘어 들어간 누수입니다. 분할을 장면·영상 단위로 다시 하고, 지각 해시로 남은 중복을 확인해야 합니다</button>
+    </div>
+    <div class="expl" id="e3">30fps에서 이웃 프레임은 파일명만 다른 <b>같은 이미지</b>입니다. 무작위 분할은 그 짝을 양쪽으로 갈라놓고, 모델은 val을 "본 적 있는 그림"으로 풉니다. 여기서 무서운 것은 점수가 <b>일관되게 높다</b>는 점입니다 — 재실행해도 같은 거짓 점수가 나오므로 분산으로는 절대 드러나지 않습니다. 분할 단위를 장면·영상으로 바꾼 뒤, LAB 7-2처럼 해시와 해밍 거리로 남은 중복을 확인하는 것이 순서입니다.</div>
+  </div>
+
+  <div class="refs">
+    <h2>더 읽을거리</h2>
+    <ol>
+      <li>Liu et al., <a href="https://arxiv.org/abs/2304.08485">Visual Instruction Tuning (LLaVA)</a>, NeurIPS 2023 — 캡션과 박스를 텍스트로 GPT-4에 넘겨 158K를 만든 원형.</li>
+      <li>Liu et al., <a href="https://arxiv.org/abs/2310.03744">Improved Baselines with Visual Instruction Tuning (LLaVA-1.5)</a>, 2023 — §3.2 형식 지시문, §5.1 데이터 효율, §5.2 환각에 대한 재해석.</li>
+      <li>Li et al., <a href="https://arxiv.org/abs/2305.10355">Evaluating Object Hallucination in Large Vision-Language Models (POPE)</a>, EMNLP 2023 — "예" 편향과 공동 출현이 만드는 환각.</li>
+      <li>Liu et al., <a href="https://arxiv.org/abs/2306.14565">Mitigating Hallucination in Large Multi-Modal Models via Robust Instruction Tuning (LRV-Instruction)</a>, ICLR 2024 — 부정 지시 3층위, 그리고 긍정·부정 균형의 효과.</li>
+      <li>Chen et al., <a href="https://arxiv.org/abs/2311.12793">ShareGPT4V</a>, ECCV 2024 · Deitke et al., <a href="https://arxiv.org/abs/2409.17146">Molmo and PixMo</a>, 2024 — 합성 캡션으로 규모를 내는 길과, 그 의존을 피하는 길.</li>
+      <li>Xu et al., <a href="https://arxiv.org/abs/2402.11690">Vision-Flan</a>, ACL Findings 2024 — 187개 태스크 166만 건, 그리고 "합성 데이터는 형식을 조율한다"는 결론.</li>
+      <li>Tong et al., <a href="https://arxiv.org/abs/2406.16860">Cambrian-1</a>, NeurIPS 2024 — 데이터 큐레이션과 소스 비율, answer machine phenomenon.</li>
+      <li>Chen et al., <a href="https://arxiv.org/abs/2403.20330">Are We on the Right Way for Evaluating LVLMs? (MMStar)</a>, 2024 · Lee et al., <a href="https://arxiv.org/abs/2107.06499">Deduplicating Training Data Makes Language Models Better</a>, ACL 2022 — 누수와 중복 제거.</li>
+    </ol>
+  </div>
+
+  <div class="next">
+    이전 장 — <a href="06.html">06 LoRA — 큰 모델을 얇게 고치기</a><br>
+    다음 장 — <a href="08.html"><b>08 판정기로 쓰는 VLM</b></a>: 이 장에서 만든 데이터가 "예 / 아니오"를 가르쳤다면, 다음 장은 그 한 글자를 실제 판정 시스템으로 쓸 때 무엇이 무너지는지를 봅니다.
+  </div>
+
+  <footer>VLM 워크북 · 개인 학습 노트 · 인터랙티브 실습은 전부 브라우저 안에서 돕니다.</footer>
+</main>
+</div>
+
+<script defer src="../assets/js/site.js"></script>
+<script defer src="../assets/js/labs/ch07-data.js"></script>
+</body>
+</html>

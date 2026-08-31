@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>11 서빙 — 양자화와 지연 — VLM 워크북</title>
+<meta name="description" content="VLM 지연의 세 조각(비전 인코딩·프리필·디코딩), KV 캐시와 연속 배칭, INT8·INT4와 AWQ·GPTQ·SmoothQuant, CPU 서빙과 측정 규율까지. 지연 예산과 양자화 손실을 브라우저에서 직접 굴려 봅니다.">
+<script>try{var t=localStorage.getItem('vlmwb_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="../assets/css/base.css">
+<style>
+  /* 11장 전용 최소 스타일 */
+  .legend i.d{background:var(--ok)}
+  input[type=range]:disabled{opacity:.45;cursor:not-allowed}
+  .lab .assume{color:var(--tx3);font-size:12.5px;line-height:1.7;margin:10px 0 0}
+  .lab .cmp{background:var(--panel2);border-radius:8px;padding:12px 14px}
+  .lab .cmp .cap{font-size:12px;color:var(--tx3);margin-bottom:2px}
+</style>
+</head>
+<body data-chapter="11">
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+<div class="wrap">
+<nav class="rail" aria-label="목차"></nav>
+
+<main id="main">
+  <div class="eyebrow">CHAPTER 11</div>
+  <h1>서빙 — 양자화와 지연</h1>
+  <p class="lede">모델이 잘 맞히는가는 이제 절반의 질문입니다. 나머지 절반은 <b>"그 답이 몇 밀리초 뒤에 도착하는가"</b>입니다. 이 장에서는 VLM의 지연을 세 조각으로 분해하고, 양자화가 그중 어느 조각을 줄이는지 — 그리고 어느 조각은 아무리 비트를 내려도 꿈쩍하지 않는지 — 를 손으로 만져봅니다.</p>
+
+  <p>TensorRT로 검출기를 INT8 캘리브레이션해 배포해 본 적이 있다면, 이 장의 도구 상자는 이미 절반쯤 익숙합니다. 정밀도를 낮춰 메모리와 연산을 아끼고, 캘리브레이션 데이터로 스케일을 잡고, 정확도가 얼마나 떨어졌는지 재고, 배치 크기를 올려 처리량을 뽑는 일 — 전부 하던 그대로입니다.</p>
+  <p>달라지는 것은 하나입니다. <strong>검출기는 한 번 넣으면 한 번 나옵니다.</strong> 입력이 정해지면 비용도 정해집니다. 그런데 VLM은 답을 <em>한 토큰씩 만들어냅니다</em>. 이 디코딩 루프가 두 개의 새 변수를 데려옵니다 — <strong>출력 길이가 지연을 정하고, KV 캐시가 메모리를 먹습니다.</strong> 한 문장으로 줄이면 이렇습니다.</p>
+  <blockquote><p>검출기의 지연은 <b>입력</b>이 정합니다. VLM의 지연은 <b>출력</b>이 정합니다.</p></blockquote>
+
+  <h2>1. 지연의 해부 — 세 조각</h2>
+  <p>이미지 한 장과 질문 하나를 넣고 답을 받기까지, 시간은 정확히 세 군데에서 쓰입니다.</p>
+  <ol>
+    <li><strong>비전 인코딩</strong> — ViT가 패치를 훑어 시각 토큰을 만듭니다. 요청당 <em>정확히 한 번</em>이고, 비용은 이미지 토큰 수에 비례합니다(1장).</li>
+    <li><strong>프리필(prefill)</strong> — 시각 토큰 + 텍스트 토큰 전체를 LLM에 한 번에 밀어 넣어 KV 캐시를 채웁니다. 입력 토큰이 <em>병렬로</em> 처리되므로 연산기가 꽉 찹니다.</li>
+    <li><strong>디코딩(decode)</strong> — 토큰을 하나씩 만듭니다. 한 스텝에 새 토큰은 <em>단 하나</em>뿐입니다.</li>
+  </ol>
+  <p>세 조각은 성격이 전혀 다릅니다. 앞의 둘은 <strong>연산 바운드</strong>이고, 마지막 하나는 <strong>메모리 대역폭 바운드</strong>입니다. 이 구분이 이 장 전체의 뼈대입니다.</p>
+
+  <h3>1-1. 디코딩 한 스텝에서 벌어지는 일</h3>
+  <p>토큰 하나를 만들려면 모델의 <strong>가중치를 전부 한 번씩 메모리에서 읽어야</strong> 합니다. 7B 모델을 FP16으로 올리면 14GB입니다. 그런데 그 스텝에서 실제로 하는 연산은 대략 2 × 7e9 = <span class="tok v">14 GFLOP</span>뿐입니다.</p>
+  <p>숫자를 대입해 보면 기괴한 그림이 나옵니다. A100의 HBM 대역폭은 약 2.0TB/s이니 14GB를 읽는 데 <strong>약 7ms</strong>가 걸립니다. 같은 카드의 연산량은 312 TFLOPS이니 14 GFLOP은 <strong>0.045ms</strong>면 끝납니다. <strong>연산기는 99% 놀고 있습니다.</strong> 디코딩 스텝 시간은 사실상 이렇게 결정됩니다.</p>
+  <p style="font-family:'IBM Plex Mono',monospace;font-size:14px;color:var(--tx2)">
+    스텝 시간 ≈ (가중치 바이트 + KV 캐시 바이트) ÷ 메모리 대역폭
+  </p>
+  <p>여기서 두 가지가 곧바로 따라 나옵니다. <strong>①</strong> 가중치를 절반 크기로 줄이면(FP16 → INT8) 디코딩이 대략 두 배 빨라집니다 — 양자화가 듣는 지점입니다. <strong>②</strong> 배치를 키워도 가중치 읽기는 <em>한 번</em>입니다 — 배치가 거의 공짜인 이유이고, 다음 절의 주제입니다.</p>
+
+  <h3>1-2. 판정기가 빠른 이유</h3>
+  <p>총 지연은 이렇게 씁니다.</p>
+  <p style="font-family:'IBM Plex Mono',monospace;font-size:14px;color:var(--tx2)">
+    총 지연 = 비전 인코딩 + 프리필 + <b>(출력 토큰 수 × 스텝 시간)</b>
+  </p>
+  <p>마지막 항만 출력 길이에 비례합니다. 그래서 8장의 <strong>판정기</strong>처럼 <span class="tok l">"예"</span> 한 토큰만 뱉는 형태는 디코딩이 <em>단 한 스텝</em>이고, 지연이 사실상 입력 쪽에서 결정됩니다. 반대로 상황을 200토큰으로 서술하게 하면 그 스텝을 200번 반복합니다 — 같은 모델, 같은 이미지인데 지연이 자릿수 단위로 달라집니다.</p>
+  <p><strong>"출력을 짧게 하라"가 서빙 최적화의 첫 번째 항목인 이유가 이것입니다.</strong> 커널을 손대기 전에, 프롬프트에서 답 형식을 줄이는 것이 언제나 더 큽니다.</p>
+
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>조각</th><th>무엇에 비례하는가</th><th>병목 자원</th><th>가중치 양자화 효과</th></tr></thead>
+    <tbody>
+      <tr><td>비전 인코딩</td><td>이미지 토큰 수 × 인코더 크기</td><td>연산</td><td class="num">거의 없음</td></tr>
+      <tr><td>프리필</td><td>입력 토큰 수 × 모델 크기</td><td>연산</td><td class="num">거의 없음</td></tr>
+      <tr><td>디코딩</td><td><b>출력 토큰 수</b> × 스텝 시간</td><td>메모리 대역폭</td><td class="num">큼(바이트에 비례)</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="lab">
+    <div class="lab-tag">LAB 11-1 · 지연 예산 계산기</div>
+    <h3>시간이 어디로 가는지 먼저 보기</h3>
+    <p class="hint">막대는 요청 1건의 지연을 <span class="tok v">비전</span> · <span class="tok l">프리필</span> · <b style="color:var(--ok)">디코딩</b>으로 쪼갠 것입니다. 아래 곡선은 출력 토큰 수를 1에서 512까지 밀었을 때의 총 지연이고, 점선은 출력과 무관한 <b>고정 비용</b>입니다. 세 가지를 관찰해 보세요 — ① 정밀도를 W4A16으로 내렸을 때 <b>줄어드는 막대와 그대로인 막대</b>, ② 하드웨어를 CPU로 옮겼을 때 <b>주인이 바뀌는 막대</b>, ③ CPU에서 코어를 늘렸을 때 디코딩이 <b>거의 안 줄어드는</b> 것.</p>
+    <div class="row">
+      <div style="flex:1;min-width:270px">
+        <canvas id="lat_bar" aria-label="비전·프리필·디코딩 지연 분해 막대"></canvas>
+        <div class="legend">
+          <span><i class="v"></i>비전 인코딩</span>
+          <span><i class="l"></i>프리필</span>
+          <span><i class="d"></i>디코딩</span>
+        </div>
+        <canvas id="lat_curve" style="margin-top:12px" aria-label="출력 토큰 수에 따른 총 지연 곡선"></canvas>
+      </div>
+      <div class="ctl">
+        <div><label for="lat_model">LLM 크기 <b id="lat_modelv">7B</b></label>
+          <input type="range" id="lat_model" min="0" max="6" step="1" value="3"></div>
+        <div>
+          <label>정밀도</label>
+          <div class="seg" id="lat_prec">
+            <button type="button" data-p="fp16" class="sel">FP16</button>
+            <button type="button" data-p="w8a16">W8A16</button>
+            <button type="button" data-p="w8a8">W8A8</button>
+            <button type="button" data-p="w4a16">W4A16</button>
+          </div>
+        </div>
+        <div><label for="lat_hw">하드웨어 <b id="lat_hwv">A100 80GB</b></label>
+          <input type="range" id="lat_hw" min="0" max="5" step="1" value="4"></div>
+        <div id="lat_coresrow"><label for="lat_cores">CPU 코어 수 <b id="lat_coresv">—</b></label>
+          <input type="range" id="lat_cores" min="0" max="5" step="1" value="3"></div>
+        <div><label for="lat_vis">이미지 토큰 <b id="lat_visv">1,024개</b></label>
+          <input type="range" id="lat_vis" min="0" max="6" step="1" value="4"></div>
+        <div><label for="lat_out">출력 토큰 <b id="lat_outv">64토큰</b></label>
+          <input type="range" id="lat_out" min="0" max="9" step="1" value="6"></div>
+        <div><label for="lat_batch">동시 요청 <b id="lat_batchv">1건</b></label>
+          <input type="range" id="lat_batch" min="0" max="5" step="1" value="0"></div>
+        <div class="stat">
+          총 지연 <b id="lat_total">—</b><br>
+          첫 토큰까지(TTFT) <span id="lat_ttft">—</span><br>
+          토큰당(TPOT) <span id="lat_tpot">—</span><br>
+          처리량 <span id="lat_fps">—</span> · <span id="lat_tps">—</span><br>
+          KV 캐시 <span id="lat_kv">—</span><br>
+          필요 메모리 <span id="lat_mem">—</span>
+        </div>
+      </div>
+    </div>
+    <p class="hint" style="margin:14px 0 0" id="lat_verdict"></p>
+    <p class="assume" id="lat_assume"></p>
+    <p class="assume">실측 벤치마크가 아니라 <b>루프라인 근사</b>입니다. 연산 바운드 구간은 <code>FLOPs ÷ (peak × MFU)</code>, 디코딩 스텝은 <code>읽는 바이트 ÷ 유효 대역폭</code>으로 계산했습니다. 하드웨어의 메모리 대역폭·dense BF16 연산량은 제조사가 공개한 데이터시트 값이고, 효율 계수(MFU 0.35~0.40, 대역폭 이용률 0.65~0.75)는 공개적으로 흔히 보고되는 범위의 대표값을 상수로 둔 것입니다. 동시 요청은 한 스텝에 함께 묶이는 <b>정적 배치</b>로 계산합니다 — 실제 연속 배칭의 거동과는 다릅니다. <b>절대값은 ±2배까지 틀릴 수 있습니다</b> — 어느 조각이 지배적인지를 읽는 용도입니다.</p>
+  </div>
+
+  <p>몇 가지는 직접 밀어 보기 전에는 잘 믿기지 않습니다. 이미지 토큰 1,024개짜리 판정기(출력 1토큰)를 A100에 올리면 <strong>지연의 대부분이 비전 인코딩과 프리필</strong>입니다. 여기서 LLM을 4비트로 내리는 것은 거의 아무것도 하지 않습니다. 반대로 같은 모델에 512토큰짜리 서술을 시키면 디코딩이 화면을 다 덮고, 그때는 비트를 내리는 것이 가장 큰 수가 됩니다. <strong>같은 모델이라도 "무엇을 시키느냐"에 따라 최적화의 정답이 반대가 됩니다.</strong></p>
+
+  <h2>2. KV 캐시 — 새로 생긴 메모리 항목</h2>
+  <p>디코딩 스텝마다 이전 토큰 전체와의 어텐션을 다시 계산하면 O(T²)가 반복됩니다. 그래서 모든 구현은 각 층의 <span class="tok l">K</span>·<span class="tok l">V</span>를 계산해 두고 재사용합니다. 이것이 KV 캐시입니다. 계산은 아꼈지만, 대신 <strong>메모리에 새 항목이 하나 생겼습니다.</strong></p>
+  <p style="font-family:'IBM Plex Mono',monospace;font-size:14px;color:var(--tx2)">
+    KV 바이트 = 2(K·V) × 층수 × KV헤드 수 × 헤드 차원 × 정밀도 × <b>토큰 수</b> × 배치
+  </p>
+  <p>GQA를 쓰는 7B급(층 32, KV헤드 8, 헤드차원 128, FP16)이면 <strong>토큰당 약 128KB</strong>입니다. 그런데 여기서 비전 엔지니어가 놓치기 쉬운 대목이 나옵니다 — <strong>KV 캐시를 채우는 주된 고객은 텍스트가 아니라 이미지입니다.</strong> 프롬프트가 50토큰이어도 이미지 하나가 1,024토큰이면 요청 하나가 이미 <span class="tok v">약 130MB</span>를 점유합니다. 동시 요청 32건이면 4GB가 넘습니다.</p>
+  <p>KV헤드를 줄이는 <strong>GQA/MQA</strong>가 사실상 표준이 된 이유가 여기에 있습니다. 같은 조건에서 MHA를 쓰는 13B급은 토큰당 0.8MB — 같은 배치에서 25GB를 먹습니다. 카드 한 장이 통째로 캐시로 사라집니다.</p>
+
+  <h3>2-1. 배치가 거의 공짜인 이유, 그리고 그 한계</h3>
+  <p>디코딩 스텝의 시간은 가중치를 읽는 시간이 지배한다고 했습니다. 그 읽기는 <strong>배치 전체가 공유합니다.</strong> 요청 8건을 한 스텝에 묶어도 가중치는 여전히 한 번만 읽습니다. 늘어나는 것은 KV 읽기와 실제 연산뿐인데, 둘 다 원래 여유가 있던 자원입니다. 그래서 배치를 8로 올리면 <em>요청당 지연은 조금 늘고 처리량은 거의 8배가 됩니다.</em></p>
+  <p>공짜에는 상한이 있습니다. <strong>KV 캐시 메모리</strong>가 그 상한을 정합니다. 배치를 올릴수록 캐시가 선형으로 불어나고, 카드 메모리에서 가중치를 뺀 나머지가 바닥나는 지점에서 배치는 멈춥니다. 서빙 엔진이 "동시 처리 가능한 시퀀스 수"를 스스로 계산해 뱉는 것이 바로 이 값입니다.</p>
+
+  <h3>2-2. 연속 배칭과 PagedAttention</h3>
+  <p>고전적인 정적 배치는 8건을 묶으면 <strong>가장 긴 요청이 끝날 때까지 나머지 슬롯이 논다</strong>는 문제가 있었습니다. 출력 길이가 요청마다 제각각인 생성 모델에서는 치명적입니다. <strong>연속 배칭(continuous batching)</strong>은 스텝 단위로 스케줄을 다시 짜서, 끝난 요청을 즉시 내보내고 대기 중인 요청을 그 자리에 밀어 넣습니다.</p>
+  <p>남은 문제는 메모리 단편화였습니다. 요청마다 "최대 길이만큼" 캐시를 미리 잡으면 실제 사용량과의 차이가 통째로 낭비됩니다. <strong>PagedAttention</strong>은 KV 캐시를 고정 크기 블록으로 쪼개고 블록 테이블로 간접 참조합니다 — 운영체제의 가상 메모리 페이징과 같은 발상입니다. 연속된 물리 공간이 필요 없어지니 단편화가 사라지고, 같은 프리픽스를 쓰는 요청끼리 블록을 <strong>공유</strong>할 수도 있습니다.</p>
+  <div class="note">
+    <b>프리픽스 캐싱과 이미지.</b> 같은 시스템 프롬프트를 쓰는 요청들은 프리필을 건너뛸 수 있습니다. 하지만 <b>이미지 토큰은 프레임마다 다릅니다</b> — 재사용되지 않습니다. 대신 실무에서 훨씬 자주 통하는 수가 하나 있습니다. <b>같은 이미지에 질문을 여러 개 던져야 한다면, 요청을 쪼개지 말고 한 프롬프트로 묶으세요.</b> 그래야 비전 인코딩과 이미지 프리필을 한 번만 냅니다. LAB 11-1에서 이미지 토큰이 만드는 고정 비용을 보면 이 차이가 얼마나 큰지 바로 보입니다.
+  </div>
+  <p>한 가지 더. 긴 프리필 하나가 들어오면 <strong>진행 중이던 다른 요청의 디코딩이 그동안 멈춰 섭니다.</strong> 평균 지연은 멀쩡한데 p95만 튀는 전형적인 원인입니다. 이미지 토큰이 수천 개인 VLM에서 특히 두드러지며, 프리필을 잘게 썰어 디코딩 스텝 사이에 끼워 넣는 <strong>chunked prefill</strong>이 이를 완화합니다.</p>
+
+  <h2>3. 양자화 — 무엇을, 어디까지</h2>
+  <p>양자화는 결국 <strong>바이트를 줄이는 일</strong>입니다. 디코딩이 바이트를 읽는 시간에 지배당하고 있으니, 바이트를 줄이면 그만큼 빨라집니다. 표기는 <code>W</code>(가중치)와 <code>A</code>(활성값)의 비트 수로 씁니다 — <code>W4A16</code>은 가중치 4비트, 활성값 16비트입니다.</p>
+
+  <h3>3-1. 가중치 전용(weight-only) — 디코딩만 빨라짐</h3>
+  <p>가중치를 INT4/INT8로 저장하고, 커널이 읽어들이는 순간 FP16으로 되돌려 곱합니다. 메모리 트래픽은 1/4·1/2로 줄지만 <strong>실제 곱셈은 여전히 FP16입니다.</strong> 그래서 디코딩은 크게 빨라지고, <strong>프리필은 거의 그대로거나 오히려 조금 느려집니다</strong>(디퀀트 오버헤드). 판정기처럼 입력이 무겁고 출력이 짧은 워크로드에서 4비트의 체감 이득이 실망스러운 이유입니다. <strong>AWQ와 GPTQ가 모두 이 계열입니다.</strong></p>
+
+  <h3>3-2. 활성값까지(W8A8) — 프리필도 빨라짐</h3>
+  <p>활성값도 INT8로 내리면 텐서 코어의 INT8 경로가 실제로 돌아 <strong>연산 자체가 빨라집니다</strong>. 프리필과 비전 인코딩까지 이득을 봅니다. 문제는 활성값이 가중치보다 훨씬 다루기 까다롭다는 데 있습니다.</p>
+  <p><strong>LLM.int8()</strong>이 밝힌 현상이 결정적이었습니다. 모델이 6.7B 근처를 넘어서면 특정 <em>차원</em>에 다른 값들보다 수십 배 큰 활성 이상치가 조직적으로 나타납니다. 그 차원 하나가 텐서 전체의 스케일을 잡아먹으면서 나머지가 뭉개집니다. 논문의 해법은 이상치 차원만 FP16으로 떼어 계산하는 혼합 정밀도였습니다.</p>
+  <p><strong>SmoothQuant</strong>는 더 우아한 수를 냅니다. 활성값의 이상치를 <em>채널별 스케일</em>로 가중치 쪽에 넘겨버립니다 — 수학적으로 동등한 변환이고, 활성값은 다루기 쉬워지고 가중치는 조금 험해지지만 원래 가중치가 훨씬 온순했으므로 남는 장사입니다. 이 "이상치 이사"가 W8A8을 실용 영역으로 끌어왔습니다.</p>
+
+  <h3>3-3. 4비트의 두 대표 — GPTQ와 AWQ</h3>
+  <ul>
+    <li><strong>GPTQ</strong> — 가중치를 한 열씩 양자화하면서, 이미 생긴 오차를 <em>아직 양자화하지 않은 가중치에 보정으로 떠넘깁니다</em>. 2차 정보(헤시안 근사)를 써서 어디에 얼마나 떠넘길지 정합니다. 캘리브레이션 데이터가 필요하고, 재학습은 없습니다.</li>
+    <li><strong>AWQ</strong> — 관점이 다릅니다. "모든 가중치가 똑같이 중요하지는 않다"에서 출발해, <strong>활성값이 큰 채널</strong>에 붙은 가중치 약 1%를 찾아냅니다. 중요한 것은 <em>가중치의 크기가 아니라 활성값의 크기</em>라는 점입니다. 그 채널을 <strong>스케일링으로 보호</strong>하되 혼합 정밀도는 쓰지 않아 커널이 단순하게 유지됩니다.</li>
+  </ul>
+  <p>둘 다 <strong>그룹 단위 스케일</strong>(보통 128개 채널마다 스케일 하나)을 씁니다. 왜 그래야 하는지는 말보다 그림이 빠릅니다.</p>
+
+  <div class="lab">
+    <div class="lab-tag">LAB 11-2 · 양자화 손실 시각화</div>
+    <h3>격자에 올려놓기</h3>
+    <p class="hint">가중치 한 행(입력 채널 512개)입니다. 대부분은 평범한 가우시안이고, <b style="color:var(--bad)">붉은 점</b>은 크기가 큰 이상치, <b style="color:var(--lang)">호박색 점</b>은 크기는 평범하지만 <b>활성값이 커서 출력에 크게 기여하는 중요 채널</b>입니다. 위 그림에서 점이 점선(원본)에서 멀어질수록 오차입니다. 이상치 크기를 0에서 12σ까지 밀어 보세요 — <b>가중치는 하나도 안 바뀌었는데</b> 나머지 전부의 오차가 커집니다.</p>
+    <div class="row">
+      <div style="flex:1;min-width:260px">
+        <canvas id="qz_map" aria-label="원본 가중치 대 양자화된 가중치 산점도"></canvas>
+        <canvas id="qz_err" style="margin-top:10px" aria-label="채널별 출력 기여 오차 막대"></canvas>
+      </div>
+      <div class="ctl">
+        <div><label for="qz_bits">비트 수 <b id="qz_bitsv">4비트</b></label>
+          <input type="range" id="qz_bits" min="0" max="5" step="1" value="2"></div>
+        <div><label for="qz_out">이상치 크기 <b id="qz_outv">±8σ</b></label>
+          <input type="range" id="qz_out" min="0" max="12" step="1" value="8"></div>
+        <div>
+          <label>양자화 방식</label>
+          <div class="seg" id="qz_mode">
+            <button type="button" data-mode="rtn" class="sel">RTN</button>
+            <button type="button" data-mode="group">그룹 128</button>
+            <button type="button" data-mode="awq">+ AWQ식</button>
+          </div>
+        </div>
+        <div class="stat">
+          격자 간격 Δ <b id="qz_delta">—</b><br>
+          쓰인 레벨 <span id="qz_used">—</span><br>
+          가중치 RMSE <span id="qz_rmse">—</span>
+        </div>
+        <div class="cmp">
+          <div class="cap">출력 기준 상대 오차(활성 크기로 가중)</div>
+          <div id="qz_cmp"></div>
+        </div>
+      </div>
+    </div>
+    <p class="hint" style="margin:14px 0 0" id="qz_verdict"></p>
+    <p class="assume">대칭 absmax 균등 양자화만 씁니다(Δ = absmax ÷ (2<sup>b−1</sup>−1)). AWQ 모드는 중요 채널의 가중치를 4배 키워 양자화한 뒤 다시 4로 나눕니다 — 실제 AWQ가 하는 일의 축소판입니다. 아래 막대는 그룹 하나(채널 0~127)의 채널별 출력 기여 오차이고, 세 방식의 y축 눈금은 서로 같습니다.</p>
+  </div>
+
+  <p>직접 밀어 보면 이 절의 요지가 손에 남습니다.</p>
+  <ul>
+    <li><strong>이상치는 자기만 망가지지 않습니다.</strong> absmax 하나가 격자 간격을 정하므로, 큰 값 하나가 나머지 511개의 해상도를 통째로 깎습니다. 4비트에서 레벨 15칸 중 실제로 쓰이는 것이 서너 칸으로 줄어드는 광경이 그 결과입니다.</li>
+    <li><strong>그룹 단위 스케일은 피해를 격리합니다.</strong> 같은 비트 수인데 오차가 줄어듭니다. 128개마다 스케일 하나를 더 저장하는 대가(4비트 기준 약 3% 오버헤드)로 얻는 이득이 워낙 커서, 이제는 기본값입니다.</li>
+    <li><strong>중요한 것은 크기가 아니라 영향입니다.</strong> 호박색 채널은 가중치 크기가 평범해서 어떤 "큰 값 보호" 규칙에도 걸리지 않습니다. 그런데 출력 오차의 대부분을 이들이 만듭니다. AWQ가 <em>활성값</em>을 보고 채널을 고르는 이유입니다.</li>
+    <li><strong>보호는 공짜가 아닙니다.</strong> AWQ 모드를 켜면 호박색 막대는 내려가지만 다른 막대가 조금 올라갑니다. 스케일 s를 키울수록 그룹의 absmax도 커지기 때문입니다. 논문이 s를 <em>탐색으로</em> 고르는 이유가 이 맞교환입니다.</li>
+  </ul>
+
+  <h3>3-4. 비전 인코더와 LLM을 왜 다르게 양자화할까요</h3>
+  <p>실무 기본값은 보통 <strong>"ViT는 FP16/BF16, LLM은 W8 또는 W4"</strong>입니다. 이유가 네 가지 겹칩니다.</p>
+  <ul>
+    <li><strong>체급이 다릅니다.</strong> 비전 타워는 0.1~0.6B, LLM은 2~72B입니다. ViT를 4비트로 내려서 아끼는 바이트는 전체의 몇 %도 되지 않습니다.</li>
+    <li><strong>병목이 다릅니다.</strong> ViT는 요청당 한 번, 수백~수천 토큰을 <em>병렬로</em> 처리하는 연산 바운드 구간입니다. 가중치 전용 양자화의 이득 구조(메모리 트래픽 절감)가 애초에 잘 맞지 않습니다.</li>
+    <li><strong>잃는 것이 다릅니다.</strong> 작은 글자, 얇은 경계, 낮은 대비 — 이런 저수준 단서는 활성값 정밀도에 민감합니다. 여기서 뭉개진 정보는 아래쪽 어디에서도 복구되지 않습니다(2장의 프로젝터 병목과 같은 이야기입니다).</li>
+    <li><strong>도구가 다릅니다.</strong> ViT를 정말 INT8로 내려야 한다면 그건 LLM용 PTQ가 아니라 <em>검출기에 쓰던 그 캘리브레이션</em>입니다 — 대표 이미지 수백 장으로 활성 범위를 잡는 방식이고, ONNX/OpenVINO/TensorRT 쪽 경로가 더 익숙할 것입니다.</li>
+  </ul>
+  <p>다만 <strong>CPU에서는 이야기가 뒤집힙니다.</strong> 뒤에서 보겠지만 CPU에서는 ViT가 지연의 주인인 경우가 많고, 그때는 ViT의 INT8이 가장 큰 수가 됩니다.</p>
+  <p>마지막으로 <strong>KV 캐시 양자화</strong>(FP8·INT8)가 있습니다. 가중치가 아니라 캐시를 줄이는 수이고, 이미지 토큰이 수천 개씩 쌓이는 VLM·비디오 시나리오에서 배치를 키우는 데 직접적으로 듣습니다. 다만 캐시는 어텐션 점수에 바로 들어가므로 손실에 더 민감합니다 — 길이가 길어질수록 누적됩니다.</p>
+
+  <h2>4. 손실을 어떻게 재는가</h2>
+  <p>양자화 보고서에서 가장 흔히 보는 숫자는 <strong>퍼플렉시티</strong>입니다. 그리고 그것만 보는 것이 가장 흔한 실수입니다. 퍼플렉시티는 <em>필요조건</em>이지 충분조건이 아닙니다.</p>
+  <ul>
+    <li><strong>분포가 다릅니다.</strong> 일반 텍스트 코퍼스의 퍼플렉시티는 "내 이미지에 대한 내 질문"의 성능과 느슨하게만 연결됩니다.</li>
+    <li><strong>평균은 꼬리를 감춥니다.</strong> 전체 토큰의 평균 로그 확률이 0.05 움직이는 동안, 경계에 있던 판정 몇 %가 통째로 뒤집힐 수 있습니다. 그리고 배포에서 아픈 것은 언제나 그 몇 %입니다.</li>
+    <li><strong>이산 사건을 못 봅니다.</strong> JSON 형식이 깨지는가, 좌표 자릿수가 흔들리는가, 같은 문장을 반복하기 시작하는가 — 전부 퍼플렉시티에는 거의 안 잡힙니다.</li>
+  </ul>
+  <p>그래서 재는 방식은 이렇게 잡습니다.</p>
+  <ol>
+    <li><strong>태스크 지표로, 배포 분포에서.</strong> 실제 입력 분포에서 뽑은 평가셋으로 그 태스크의 지표를 잽니다. 퍼플렉시티는 회귀 감시용 보조 지표로만 둡니다.</li>
+    <li><strong>같은 입력으로 짝지어 비교합니다.</strong> FP16과 양자화 모델에 <em>동일한 입력, 동일한 프롬프트, greedy 디코딩</em>을 먹이고 출력 일치율과 <strong>뒤집힌 사례 목록</strong>을 냅니다. 평균은 같은데 뒤집힘이 잔뜩이면 그것은 통과가 아닙니다.</li>
+    <li><strong>운용점을 고정하고 비교합니다.</strong> 판정기라면 임계값을 고정한 채 비교하면 안 됩니다. 양자화가 점수 분포를 통째로 조금 밀기만 해도 고정 임계값의 정확도는 실제 손실과 무관하게 움직입니다. <strong>같은 오경보율에 임계값을 다시 맞춘 뒤 재현율을 비교</strong>하는 것이 정직합니다(9장의 점수 읽기와 이어집니다).</li>
+    <li><strong>어려운 하위집합을 따로 봅니다.</strong> 작은 글자·저조도·가림처럼 원래 아슬아슬하던 구간에서 손실이 먼저 나타납니다. 전체 평균은 마지막에 무너집니다.</li>
+    <li><strong>캘리브레이션 데이터를 배포 분포에서 뽑습니다.</strong> 검출기 INT8 캘리브레이션과 완전히 같은 규칙입니다. 여기서 어긋나면 뒤의 모든 측정이 낙관 쪽으로 기웁니다.</li>
+  </ol>
+  <p>손실이 크다면 되돌릴 여지도 있습니다. 층별 민감도를 프로파일링해 <strong>첫 층·마지막 층·출력 임베딩은 더 높은 비트로 남기는</strong> 혼합 설정이 대표적이고, 그룹 크기를 128에서 64로 줄이는 것도 값싼 수입니다.</p>
+
+  <h2>5. CPU 서빙 — 대역폭이라는 천장</h2>
+  <p>GPU가 없는 자리에서 돌려야 할 때가 있습니다. 예산부터 적어 두는 것이 좋습니다 — 30fps 영상의 프레임 예산은 <strong>33ms</strong>이고, 사람이 버튼을 누르고 기다리는 UI는 <strong>200ms~1초</strong>입니다. 그 두 숫자가 설계 전체를 결정합니다.</p>
+  <p>CPU에서도 디코딩은 여전히 메모리 대역폭 바운드입니다. 그런데 <strong>대역폭이 20~30배 작습니다</strong>. 듀얼채널 DDR5가 90GB/s 남짓, 최신 서버 GPU는 3TB/s대입니다. 여기서 CPU 서빙의 첫 번째 규칙이 나옵니다.</p>
+  <blockquote><p><b>코어를 늘려도 디코딩은 거의 빨라지지 않습니다.</b> 코어는 연산을 늘릴 뿐, 메모리 대역폭을 늘리지 않습니다.</p></blockquote>
+  <p>LAB 11-1에서 하드웨어를 CPU로 옮기고 코어 수를 2에서 64까지 밀어 보면 이 말이 그대로 보입니다. 디코딩 막대는 거의 그대로인데 비전 인코딩과 프리필 막대만 짧아집니다. 그리고 그 과정에서 대개 <strong>비전 인코딩이 지연의 주인으로 올라섭니다</strong> — GPU에서는 잘 보이지 않던 조각입니다. 400M급 비전 타워로 1,000토큰짜리 이미지를 처리하면 약 0.8 TFLOP인데, 이는 서버 GPU에서는 눈 깜짝할 사이지만 데스크톱 CPU에서는 1초 단위의 일입니다.</p>
+  <p>그래서 CPU 처방은 GPU와 다른 방향으로 갑니다.</p>
+  <ul>
+    <li><strong>작은 모델</strong> — 0.25~2B급. 12장에서 다룹니다.</li>
+    <li><strong>작은 비전 타워와 낮은 이미지 토큰 예산</strong> — 여기서 가장 큰 이득이 나옵니다.</li>
+    <li><strong>짧은 출력</strong> — 서술 대신 판정 형식으로. 스텝 하나가 GPU보다 훨씬 비싸므로 출력 길이의 값이 GPU보다 비쌉니다.</li>
+    <li><strong>가중치 INT8/INT4 + 비전 인코더 INT8</strong> — 양쪽 다 필요합니다.</li>
+    <li><strong>매 프레임 돌리지 않기</strong> — 값싼 검출기가 후보를 거르고 VLM은 트리거될 때만 부르는 구조(14장). 평균 지연을 가장 크게 줄이는 것은 대개 모델이 아니라 호출 빈도입니다.</li>
+  </ul>
+  <p>실행 경로는 <strong>llama.cpp(GGUF)</strong>, <strong>OpenVINO GenAI</strong>, <strong>ONNX Runtime</strong>이 대표적이고, 브라우저에서는 <strong>transformers.js</strong>가 WebGPU/WASM으로 돕니다. 스레드 설정에는 함정이 하나 있습니다 — <strong>스레드를 코어 수 이상으로 올리면 오히려 느려집니다.</strong> 논리 코어(HT)를 전부 쓰는 것도 대역폭 포화 구간에서는 이득이 없고, 소켓을 넘어가면(NUMA) 원격 메모리 접근으로 손해를 봅니다.</p>
+
+  <h2>6. 엔진 — 무엇을 언제</h2>
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>엔진</th><th>주 무대</th><th>강점</th><th>유의점</th></tr></thead>
+    <tbody>
+      <tr><td>vLLM</td><td>서버 GPU</td><td>연속 배칭 + PagedAttention, 높은 처리량, OpenAI 호환 API, 주요 VLM 지원</td><td>목표가 처리량이라 단일 요청 최저 지연과는 다름</td></tr>
+      <tr><td>TensorRT-LLM</td><td>NVIDIA GPU</td><td>커널·FP8까지 밀어붙인 성능, in-flight 배칭</td><td>엔진 빌드 단계, 모델·버전 종속이 강함</td></tr>
+      <tr><td>TGI</td><td>서버 GPU</td><td>연속 배칭, 허깅페이스 생태계와의 운영 편의</td><td>세부 튜닝 여지는 위 둘보다 좁음</td></tr>
+      <tr><td>SGLang</td><td>서버 GPU</td><td>프리픽스 재사용에 강해 다회차 대화·같은 이미지 반복 질의에 유리</td><td>비교적 새로운 스택</td></tr>
+      <tr><td>llama.cpp (GGUF)</td><td>CPU · 온디바이스</td><td>다양한 저비트 양자화, 의존성 적음, mmap 로딩</td><td>멀티모달 지원은 모델별로 갈림</td></tr>
+      <tr><td>OpenVINO GenAI</td><td>Intel CPU · iGPU · NPU</td><td>INT8/INT4 가중치 압축, 검출기에 쓰던 툴체인 그대로</td><td>하드웨어 종속</td></tr>
+      <tr><td>transformers.js</td><td>브라우저(WebGPU)</td><td>서버 없음, 데이터가 기기를 떠나지 않음</td><td>소형 모델 한정, 첫 로딩 비용</td></tr>
+      <tr><td>transformers (PyTorch)</td><td>개발 · 검증</td><td>정확도 기준선, 구현 확인</td><td class="num">배포 성능의 기준으로 삼으면 안 됨</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>선택은 보통 한 문장으로 정리됩니다. <strong>동시 요청이 많은 서버라면 연속 배칭 엔진(vLLM 계열), 한 대에서 한 요청씩이라면 llama.cpp·OpenVINO 계열, 정확도 기준선이 필요할 때만 PyTorch.</strong> 그리고 <em>측정은 반드시 실제 배포할 엔진에서</em> 합니다 — 다음 절의 주제입니다.</p>
+
+  <h2>7. 측정 규율</h2>
+  <p>서빙에서 나오는 숫자는 재현되지 않으면 아무 의미가 없습니다. 최소한 이 정도는 지켜야 두 번 잰 값이 같아집니다.</p>
+  <ul>
+    <li><strong>워밍업.</strong> 첫 몇 회는 커널 컴파일·오토튜닝·CUDA 그래프 캡처·가중치 페이지 폴트가 섞여 들어옵니다. 최소 5~10회를 버리고 정상 상태에서 잽니다.</li>
+    <li><strong>p50과 p95를 같이.</strong> 평균 하나로 보고하지 않습니다. 서빙에서 아픈 것은 꼬리이고, 꼬리는 대개 프리필 간섭이나 캐시 축출에서 옵니다.</li>
+    <li><strong>지표를 쪼갭니다.</strong> TTFT(첫 토큰까지)와 TPOT(토큰당)는 원인이 다릅니다. TTFT가 나쁘면 비전·프리필·큐 대기를, TPOT가 나쁘면 대역폭과 배치를 봅니다.</li>
+    <li><strong>출력 길이를 고정합니다.</strong> 길이가 자유로우면 지연 비교가 성립하지 않습니다. <code>max_new_tokens</code>를 고정하고 greedy로 재는 것이 기본입니다.</li>
+    <li><strong>동시성은 축입니다.</strong> 한 점이 아니라 스윕입니다 — 동시 1·2·4·8·16에서 처리량과 p95를 함께 그려야 "몇 건까지 받을 수 있는가"에 답할 수 있습니다.</li>
+    <li><strong>기계를 고정합니다.</strong> CPU는 <code>taskset</code>으로 코어를 묶고 스레드 수를 명시하고 거버너를 고정합니다. GPU는 클럭·전력 제한을 고정하고 다른 프로세스를 비웁니다. 이것을 안 하면 같은 명령이 20% 흔들립니다.</li>
+    <li><strong>배포 형상 그대로.</strong> PyTorch eager로 재고 vLLM으로 배포하면 그 숫자는 버리는 숫자입니다.</li>
+  </ul>
+  <p>보고 형식도 함께 정해 두면 좋습니다. <em>"빠릅니다"</em> 대신 이렇게 씁니다.</p>
+  <p style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--tx2)">
+    7B · W4A16 · GPU 1장 · 이미지 토큰 1,024 · 출력 64 고정 · 동시 8 · 워밍업 10회 후 200회<br>
+    → TTFT p50 / p95, TPOT p50 / p95, 처리량 req/s
+  </p>
+  <p><strong>한 줄 정리</strong> — VLM 서빙의 지연은 비전 인코딩·프리필·디코딩 셋으로 갈라지고, 양자화는 그중 <em>디코딩</em>에 가장 크게 듣습니다. 그래서 최적화의 정답은 모델이 아니라 <strong>워크로드의 모양</strong>(이미지 토큰 수와 출력 길이)이 정합니다. 그리고 무엇을 하든, 측정 조건을 적어두지 않은 숫자는 다음 주에 아무도 재현하지 못합니다.</p>
+
+  <h2>8. 확인 문제</h2>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 11-1</div>
+    <p class="q">이미지 토큰 1,024개를 넣고 <code>"예"</code>/<code>"아니오"</code>를 <b>한 토큰</b>으로 답하게 하는 판정기가 있습니다. 가중치를 FP16에서 W4A16으로 내렸는데 지연이 기대만큼 줄지 않았습니다. 가장 그럴듯한 이유는 무엇일까요?</p>
+    <div class="opts" id="q1">
+      <button type="button" data-a="1">이 워크로드는 비전 인코딩과 프리필이 지배하는데 둘 다 연산 바운드라, 메모리 트래픽만 줄이는 가중치 전용 양자화로는 거의 빨라지지 않습니다</button>
+      <button type="button" data-a="0">4비트 커널은 언제나 FP16보다 느리기 때문에, 양자화는 메모리를 아낄 때만 씁니다</button>
+      <button type="button" data-a="0">양자화는 정확도만 바꾸고 속도에는 영향을 주지 않습니다</button>
+    </div>
+    <div class="expl" id="e1">가중치 전용 양자화가 줄이는 것은 <b>디코딩 스텝의 메모리 읽기</b>입니다. 출력이 1토큰이면 디코딩은 한 스텝뿐이라 줄일 대상이 애초에 거의 없습니다. 이 경우 손대야 할 곳은 이미지 토큰 예산(1장·3장), 비전 인코더 체급, 또는 프리필까지 빨라지는 W8A8입니다.</div>
+  </div>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 11-2</div>
+    <p class="q">동시 요청을 1건에서 8건으로 올렸더니 요청당 지연은 조금만 늘었는데 처리량은 6배가 되었습니다. 무엇이 이 현상을 만들까요?</p>
+    <div class="opts" id="q2">
+      <button type="button" data-a="0">배치가 커지면 모델이 출력 토큰을 더 적게 만들기 때문입니다</button>
+      <button type="button" data-a="1">디코딩 스텝은 가중치를 메모리에서 읽는 시간이 지배하고 그 읽기를 배치 전체가 공유합니다 — 늘어나는 것은 KV 읽기와 연산뿐이며, 상한은 KV 캐시 메모리가 정합니다</button>
+      <button type="button" data-a="0">배치를 키우면 어텐션이 선형이 되어 토큰당 연산량이 줄어듭니다</button>
+    </div>
+    <div class="expl" id="e2">디코딩은 메모리 대역폭 바운드이고, 가중치 읽기는 배치 크기와 무관하게 스텝당 한 번입니다. 그래서 배치는 <b>거의 공짜</b>입니다 — 다만 요청마다 KV 캐시가 선형으로 늘어나므로, 카드 메모리에서 가중치를 뺀 나머지가 동시 처리 가능한 시퀀스 수의 상한이 됩니다.</div>
+  </div>
+  <div class="lab">
+    <div class="lab-tag">QUIZ 11-3</div>
+    <p class="q">양자화 후 일반 텍스트 코퍼스의 퍼플렉시티가 5.68에서 5.74로 거의 그대로였습니다. 이 모델을 판정 파이프라인에 배포해도 될까요?</p>
+    <div class="opts" id="q3">
+      <button type="button" data-a="0">됩니다. 퍼플렉시티는 언어 모델의 표준 지표이므로 이 정도면 손실이 없다고 보아도 됩니다</button>
+      <button type="button" data-a="0">안 됩니다. 퍼플렉시티는 양자화 평가에 아무 의미가 없으므로 애초에 재지 말아야 합니다</button>
+      <button type="button" data-a="1">아직 모릅니다. 배포 분포에서 뽑은 평가셋으로, 같은 입력을 짝지어, 같은 운용점(예: 같은 오경보율)에 임계값을 맞춘 뒤 태스크 지표와 뒤집힌 사례를 세어야 합니다</button>
+    </div>
+    <div class="expl" id="e3">퍼플렉시티는 <b>필요조건이지 충분조건이 아닙니다</b>. 평균 지표라 경계 사례가 통째로 뒤집혀도 거의 움직이지 않고, 평가 코퍼스의 분포가 배포 분포와 다릅니다. 회귀 감시용 보조 지표로는 유용하니 재지 말라는 뜻은 아닙니다 — <b>그것만 보고 결정하지 말라</b>는 뜻입니다.</div>
+  </div>
+
+  <div class="refs">
+    <h2>더 읽을거리</h2>
+    <ol>
+      <li>Pope et al., <a href="https://arxiv.org/abs/2211.05102">Efficiently Scaling Transformer Inference</a>, MLSys 2023 — 프리필/디코딩의 비용 모델과 루프라인 분석의 출발점.</li>
+      <li>Kwon et al., <a href="https://arxiv.org/abs/2309.06180">Efficient Memory Management for LLM Serving with PagedAttention (vLLM)</a>, SOSP 2023 — KV 캐시 페이징과 블록 공유.</li>
+      <li>Yu et al., <a href="https://www.usenix.org/conference/osdi22/presentation/yu">Orca: A Distributed Serving System for Transformer-Based Generative Models</a>, OSDI 2022 — 연속(iteration-level) 배칭의 원형.</li>
+      <li>Agrawal et al., <a href="https://arxiv.org/abs/2403.02310">Taming Throughput-Latency Tradeoff in LLM Inference (Sarathi-Serve)</a>, OSDI 2024 — chunked prefill과 프리필/디코딩 간섭.</li>
+      <li>Dettmers et al., <a href="https://arxiv.org/abs/2208.07339">LLM.int8()</a>, NeurIPS 2022 — 활성 이상치 현상과 혼합 정밀도 분해.</li>
+      <li>Xiao et al., <a href="https://arxiv.org/abs/2211.10438">SmoothQuant</a>, ICML 2023 — 이상치를 활성값에서 가중치로 옮기는 W8A8.</li>
+      <li>Frantar et al., <a href="https://arxiv.org/abs/2210.17323">GPTQ</a>, ICLR 2023 · Lin et al., <a href="https://arxiv.org/abs/2306.00978">AWQ</a>, MLSys 2024 — 4비트 가중치 양자화의 두 대표.</li>
+      <li>Ainslie et al., <a href="https://arxiv.org/abs/2305.13245">GQA</a>, EMNLP 2023 · Dettmers &amp; Zettlemoyer, <a href="https://arxiv.org/abs/2212.09720">The Case for 4-bit Precision</a>, ICML 2023 — KV 캐시를 줄이는 구조, 그리고 비트 수와 성능의 스케일링.</li>
+    </ol>
+  </div>
+
+  <div class="next">
+    이전 장 — <a href="10.html">10 멀티모달 판정기 전환</a><br>
+    다음 장 — <a href="12.html"><b>12 소형 VLM의 역습</b></a>: 이 장에서 지연을 줄이는 가장 확실한 수가 "작은 모델"이라는 결론에 계속 닿았습니다. 그렇다면 작은 모델은 언제, 어떤 조건에서 큰 모델을 이길까요.
+  </div>
+
+  <footer>VLM 워크북 · 개인 학습 노트 · 인터랙티브 실습은 전부 브라우저 안에서 돕니다.</footer>
+</main>
+</div>
+
+<script defer src="../assets/js/site.js"></script>
+<script defer src="../assets/js/labs/ch11-latency.js"></script>
+<script defer src="../assets/js/labs/ch11-quant.js"></script>
+</body>
+</html>
