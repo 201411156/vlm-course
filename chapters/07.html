@@ -89,9 +89,9 @@ input[type=range]:disabled{opacity:.38}
   <ul>
     <li><strong>system</strong> — 행동 규약입니다. 답변 형식, 좌표 표기법, 모르는 것에 대한 태도를 여기에 적습니다. 이 문자열은 <em>학습 때와 추론 때가 글자 단위로 같아야</em> 합니다.</li>
     <li><strong>human</strong> — 질문과 <strong>이미지가 놓일 자리</strong>입니다.</li>
-    <li><strong>gpt</strong>(assistant) — <strong>손실이 걸리는 유일한 턴</strong>입니다. 나머지 토큰은 보통 −100으로 마스킹되어 학습에서 제외됩니다. 즉 모델은 질문을 <em>배우는</em> 것이 아니라 <strong>질문에 대한 답만</strong> 배웁니다.</li>
+    <li><strong>gpt</strong>(assistant) — <strong>손실이 걸리는 유일한 턴</strong>입니다. 나머지 토큰은 보통 −100으로 마스킹되어 학습에서 제외됩니다(−100은 프레임워크가 손실 계산에서 건너뛰는 관례값입니다). 즉 모델은 질문을 <em>배우는</em> 것이 아니라 <strong>질문에 대한 답만</strong> 배웁니다.</li>
   </ul>
-  <p><span class="tok l">&lt;image&gt;</span> 플레이스홀더는 그냥 표식이 아닙니다. 학습 스크립트가 이 자리를 <strong>1장에서 본 시각 토큰 수백 개로 치환</strong>합니다. 그래서 두 가지가 따라옵니다. 첫째, <em>위치</em>가 의미를 가집니다 — 질문 앞에 두면 "보고 나서 묻는" 순서가 되고, 뒤에 두면 그 반대가 됩니다. 둘째, <em>개수</em>가 정확히 맞아야 합니다. 이미지 두 장을 주면서 플레이스홀더를 하나만 적으면, 운이 좋으면 예외가 나고 운이 나쁘면 <strong>이미지를 무시한 채 텍스트만으로 조용히 학습됩니다</strong>.</p>
+  <p><span class="tok l">&lt;image&gt;</span> 플레이스홀더는 그냥 표식이 아닙니다. 학습 스크립트가 이 자리를 <strong>1장에서 본 시각 토큰 수백 개로 치환</strong>합니다 — 개수는 패치 격자의 칸 수, 곧 (입력 크기 ÷ 패치 크기)²입니다. 그래서 두 가지가 따라옵니다. 첫째, <em>위치</em>가 의미를 가집니다 — 질문 앞에 두면 "보고 나서 묻는" 순서가 되고, 뒤에 두면 그 반대가 됩니다. 둘째, <em>개수</em>가 정확히 맞아야 합니다. 이미지 두 장을 주면서 플레이스홀더를 하나만 적으면, 운이 좋으면 예외가 나고 운이 나쁘면 <strong>이미지를 무시한 채 텍스트만으로 조용히 학습됩니다</strong>.</p>
   <p>필드 이름은 도구마다 다릅니다. <code>{"from","value"}</code>를 쓰는 계열이 있고 <code>{"role","content"}</code>를 쓰는 계열이 있지만, 구조는 같습니다. 어느 쪽이든 최종적으로는 모델별 <strong>chat template</strong>을 통과해 특수 토큰이 붙은 하나의 긴 문자열이 됩니다 — 같은 JSON이라도 모델이 바뀌면 실제 학습되는 문자열은 달라집니다.</p>
 
   <div class="note">
@@ -238,7 +238,7 @@ input[type=range]:disabled{opacity:.38}
   <div class="lab">
     <div class="lab-tag">LAB 7-2 · 같은 장면 찾기</div>
     <h3>누수 탐지 미니</h3>
-    <p class="hint">장면 8개를 각각 두 프레임씩 찍은 16장입니다(<b>A1</b>과 <b>A2</b>는 같은 장면의 다른 순간). 각 이미지를 16×16 회색조로 줄여 평균 해시 256비트를 만들고, val의 각 장에 대해 train 쪽 최소 해밍 거리 <b>d</b>를 표시합니다.</p>
+    <p class="hint">장면 8개를 각각 두 프레임씩 찍은 16장입니다(<b>A1</b>과 <b>A2</b>는 같은 장면의 다른 순간). 각 이미지를 16×16 회색조로 줄여 평균 해시 256비트를 만들고, val의 각 장에 대해 train 쪽 최소 해밍 거리 <b>d</b>를 표시합니다. 기본 임계 24는 256비트 가운데 약 10%가 어긋난 지점입니다.</p>
     <div class="row" style="margin-bottom:14px">
       <div class="ctl" style="max-width:300px">
         <div>

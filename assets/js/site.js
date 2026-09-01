@@ -199,6 +199,8 @@
       if (tag === 'A' || tag === 'CODE' || tag === 'PRE' || tag === 'KBD' ||
           tag === 'ABBR' || tag === 'BUTTON' || tag === 'LABEL' ||
           tag === 'CANVAS' || /^H[1-6]$/.test(tag)) return true;
+      /* SVG 안에는 HTML <abbr> 를 넣을 수 없습니다 — 넣으면 글자가 사라집니다 */
+      if (tag === 'svg') return true;
       var c = el.classList;
       if (c && (c.contains('lab') || c.contains('refs') || c.contains('next') ||
                 c.contains('eyebrow') || c.contains('glbox') || c.contains('stat'))) return true;

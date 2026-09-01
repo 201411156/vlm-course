@@ -27,6 +27,10 @@
   .field:focus-visible{outline:2px solid var(--vis);outline-offset:1px}
   .ansbox{background:var(--panel2);border-radius:8px;padding:12px 14px;font-size:13.5px;
     color:var(--tx2);min-height:20px}
+  .fig{margin:26px 0;background:var(--panel);border:1px solid var(--line);
+    border-radius:10px;padding:16px;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;min-width:560px;max-width:100%;height:auto}
+  .fig .cap{color:var(--tx3);font-size:12.5px;margin:12px auto 0;text-align:center;max-width:60ch}
   @media (prefers-reduced-motion: reduce){ .bar i{transition:none} }
 </style>
 </head>
@@ -50,28 +54,132 @@
   <p>그래서 이 장의 결론을 먼저 적어두겠습니다. <strong>VLM에서 해상도는 성능 노브가 아니라 예산 노브입니다.</strong> 얼마를 쓸지 정하는 일이지, 얼마나 잘할지를 정하는 일이 아닙니다.</p>
 
   <h2>2. 224라는 상자</h2>
-  <p>ViT 계열의 오랜 기본값은 224×224였습니다. 이유는 성능이 아니라 <strong>공학적 편의</strong>였습니다. 위치 임베딩이 <em>그 격자 크기에 맞춘</em> 고정 길이 테이블로 묶여 있고, 배치를 만들려면 시퀀스 길이가 같아야 하니까요. CLIP도 여기서 출발했고, 뒤에 336px 변종이 나왔습니다 — 24×24 격자, <span class="tok v">576 토큰</span>. LLaVA-1.5가 쓴 것이 이 336px 판입니다.</p>
+  <p>ViT 계열의 오랜 기본값은 224×224였습니다. 이유는 성능이 아니라 <strong>공학적 편의</strong>였습니다. 위치 임베딩이 <em>그 패치 격자 크기에 맞춘</em> 고정 길이 테이블로 묶여 있고, 배치를 만들려면 시퀀스 길이가 같아야 하니까요. CLIP도 여기서 출발했습니다.</p>
+  <p>그 224가 토큰 몇 개가 되는지는 1장에서 쓴 공식 하나로 정해집니다 — <strong>한 변의 패치 수 = 입력 크기 ÷ 패치 크기</strong>, <strong>시각 토큰 수 = 그 제곱</strong>. CLIP이 쓰는 <code>ViT-L/14</code>에서 <code>/14</code>가 곧 <strong>패치 한 변이 14픽셀</strong>이라는 표기입니다. 입력만 갈아 끼우면 같은 공식이 두 줄이 됩니다.</p>
+
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>입력</th><th>패치</th><th>한 변의 패치 수</th><th>패치 격자</th><th>시각 토큰</th></tr></thead>
+    <tbody>
+      <tr><td class="num">224px</td><td class="num">14px</td><td class="num">224 ÷ 14 = 16</td><td class="num">16×16</td><td class="num">16² = 256</td></tr>
+      <tr><td class="num">336px</td><td class="num">14px</td><td class="num">336 ÷ 14 = 24</td><td class="num">24×24</td><td class="num">24² = <b>576</b></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>뒤에 나온 336px 변종이 이 표의 아랫줄입니다 — 패치 격자 24×24, <span class="tok v">576 토큰</span>. LLaVA-1.5가 쓴 것이 이 336px 판입니다.</p>
   <p>224가 무엇을 뜻하는지는 숫자로 보면 분명해집니다. A4 문서 한 장을 224×224로 줄이면 본문 글자 한 자의 높이가 <strong>두세 픽셀</strong>이 됩니다. 사람도 못 읽습니다. 모델이 못 읽는 것이 이상한 일이 아니라, <em>읽을 수 있는 픽셀이 애초에 남아 있지 않은</em> 것입니다.</p>
   <p>두 번째 문제는 종횡비입니다. 고정 정사각 입력은 16:9 파노라마도, 세로로 긴 영수증도 정사각으로 눌러 넣습니다. 글자가 찌그러지고, 가로로 긴 장면에서는 좌우 끝이 잘려 나갑니다.</p>
-  <p>위치 임베딩을 보간(interpolate)해서 격자를 448이나 672로 늘리는 손은 오래전부터 있었습니다. 다만 그렇게 늘린 격자는 <strong>사전학습이 본 적 없는 배치</strong>이므로, 늘린 만큼 다시 학습해 주지 않으면 이득이 생각만큼 나오지 않습니다. 그래서 판은 다른 방향으로 갔습니다 — 인코더를 늘리는 대신, <strong>이미지를 잘라서 여러 번 넣는</strong> 쪽입니다.</p>
+  <p>위치 임베딩을 보간(interpolate)해서 패치 격자를 448이나 672 입력에 맞게 늘리는 손은 오래전부터 있었습니다. 다만 그렇게 늘린 패치 격자는 <strong>사전학습이 본 적 없는 배치</strong>이므로, 늘린 만큼 다시 학습해 주지 않으면 이득이 생각만큼 나오지 않습니다. 그래서 판은 다른 방향으로 갔습니다 — 인코더를 늘리는 대신, <strong>이미지를 잘라서 여러 번 넣는</strong> 쪽입니다.</p>
 
   <h2>3. 잘라서 넣기 — 동적 해상도와 타일</h2>
   <p>발상은 단순합니다. 224나 336짜리 인코더는 그대로 두고, 큰 이미지를 <strong>그 크기의 타일 여러 장으로 쪼개서</strong> 전부 통과시킨 뒤 토큰을 이어 붙입니다. 인코더를 새로 학습할 필요가 없고, 해상도는 타일 수만큼 올라갑니다.</p>
 
-  <h3>3-1. AnyRes — 격자 후보 중에서 고르기</h3>
-  <p>LLaVA-NeXT의 <strong>AnyRes</strong>는 미리 정해둔 격자 후보 <code>{2×2, 1×{2,3,4}, {2,3,4}×1}</code> 가운데 입력 이미지의 종횡비에 가장 가까운 것을 고릅니다. 336px 타일 기준으로 672×672, 336×1344, 1344×336 같은 배치가 나오고, 공식 발표의 표현으로는 <em>"픽셀 4배"</em>입니다. 여기에 <strong>전역 축소본(base image) 한 장</strong>을 붙입니다.</p>
-  <p>LLaVA-OneVision 논문은 이 회계를 아예 식으로 적어두었습니다 — 격자가 a×b이고 크롭 하나가 T 토큰이면 <strong>L = (a×b + 1) × T</strong>. 그 <strong>+1</strong>이 축소본입니다.</p>
-  <p>숫자를 넣어봅시다. 336px 타일 하나가 24×24 격자 = 576 토큰이고, 2×2면 타일 4장 + 축소본 1장. <span class="tok v">(4+1) × 576 = 2,880 토큰</span>입니다. 336px 단일 입력의 576에서 <strong>정확히 5배</strong>가 되었고, 어텐션 비용은 그 제곱 쪽으로 갑니다. 이 2,880이라는 수는 뒤에 나온 여러 논문(MM1·Cambrian-1·Idefics2)이 "비싼 쪽"의 기준점으로 인용하는 숫자이기도 합니다.</p>
+  <h3>3-1. AnyRes — 타일 배치 후보 중에서 고르기</h3>
+  <p>LLaVA-NeXT의 <strong>AnyRes</strong>는 미리 정해둔 타일 배치 후보 <code>{2×2, 1×{2,3,4}, {2,3,4}×1}</code> 가운데 입력 이미지의 종횡비에 가장 가까운 것을 고릅니다. 336px 타일 기준으로 672×672, 336×1344, 1344×336 같은 배치가 나오고, 공식 발표의 표현으로는 <em>"픽셀 4배"</em>입니다. 여기에 <strong>전역 축소본(base image) 한 장</strong>을 붙입니다.</p>
+  <p>LLaVA-OneVision 논문은 이 회계를 아예 식으로 적어두었습니다 — 타일 배치가 a×b이고 크롭 하나가 T 토큰이면 <strong>L = (a×b + 1) × T</strong>. 그 <strong>+1</strong>이 축소본입니다.</p>
+  <p>숫자를 넣어봅시다. 336px 타일 하나가 패치 격자 24×24 = 576 토큰이고, 타일 배치 2×2면 타일 4장 + 축소본 1장. <span class="tok v">(4+1) × 576 = 2,880 토큰</span>입니다. 336px 단일 입력의 576에서 <strong>정확히 5배</strong>가 되었고, 어텐션 비용은 그 제곱 쪽으로 갑니다. 이 2,880이라는 수는 뒤에 나온 여러 논문(MM1·Cambrian-1·Idefics2)이 "비싼 쪽"의 기준점으로 인용하는 숫자이기도 합니다.</p>
+
+  <div class="fig">
+    <svg viewBox="0 0 680 434" role="img" aria-label="바깥의 타일 배치와 안쪽의 패치 격자, 두 층이 각각 무엇을 담당하고 어떻게 2,880 토큰이 되는지 보여주는 도해">
+      <defs>
+        <marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,1 L9,5 L0,9 z" fill="var(--tx3)"></path>
+        </marker>
+        <pattern id="pg3" width="4.6667" height="4.6667" patternUnits="userSpaceOnUse" patternTransform="translate(10 210)">
+          <path d="M4.6667 0 L0 0 L0 4.6667" fill="none" stroke="var(--vis)" stroke-width="0.4" opacity="0.6"></path>
+        </pattern>
+      </defs>
+      <g font-family="'IBM Plex Sans KR', system-ui, sans-serif" font-size="10.5">
+
+        <text x="10" y="18" fill="var(--lang)" font-family="'IBM Plex Mono', monospace" font-size="10.5">① 바깥 층 · 타일 배치 — 종횡비와 유효 해상도를 정합니다</text>
+
+        <rect x="10" y="36" width="80" height="62" rx="6" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="50" y="71" text-anchor="middle" fill="var(--tx2)">원본</text>
+        <text x="50" y="114" text-anchor="middle" fill="var(--tx3)" font-size="9.5">종횡비를 잽니다</text>
+
+        <line x1="94" y1="67" x2="114" y2="67" stroke="var(--tx3)" marker-end="url(#ah3)"></line>
+
+        <rect x="118" y="36" width="120" height="62" rx="6" fill="var(--panel)" stroke="var(--line)"></rect>
+        <text x="178" y="58" text-anchor="middle" fill="var(--tx2)">타일 배치 후보</text>
+        <text x="178" y="76" text-anchor="middle" fill="var(--tx3)" font-family="'IBM Plex Mono', monospace" font-size="9.5">2×2 · 1×2 · 1×3 · 1×4</text>
+        <text x="178" y="90" text-anchor="middle" fill="var(--tx3)" font-family="'IBM Plex Mono', monospace" font-size="9.5">2×1 · 3×1 · 4×1</text>
+
+        <line x1="242" y1="67" x2="264" y2="67" stroke="var(--tx3)" marker-end="url(#ah3)"></line>
+        <text x="253" y="88" text-anchor="middle" fill="var(--lang)" font-size="9">선택</text>
+
+        <rect x="270" y="25" width="40" height="40" rx="3" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="315" y="25" width="40" height="40" rx="3" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="270" y="70" width="40" height="40" rx="3" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="315" y="70" width="40" height="40" rx="3" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <text x="312" y="128" text-anchor="middle" fill="var(--tx2)" font-size="9.5">타일 배치 2×2</text>
+        <text x="312" y="143" text-anchor="middle" fill="var(--tx3)" font-family="'IBM Plex Mono', monospace" font-size="9.5">유효 해상도 672×672</text>
+
+        <text x="370" y="74" text-anchor="middle" fill="var(--tx2)" font-size="15">+</text>
+
+        <rect x="384" y="46" width="42" height="42" rx="4" fill="var(--panel2)" stroke="var(--lang)" stroke-dasharray="4 3"></rect>
+        <text x="405" y="71" text-anchor="middle" fill="var(--lang)" font-size="9.5">축소본</text>
+        <text x="405" y="128" text-anchor="middle" fill="var(--tx2)" font-size="9.5">전역 축소본 1장</text>
+
+        <line x1="446" y1="20" x2="446" y2="152" stroke="var(--line)"></line>
+
+        <text x="462" y="40" fill="var(--tx2)" font-size="9.5">종횡비가 다르면 다른 배치를 고릅니다</text>
+        <rect x="462" y="54" width="26" height="26" rx="3" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="492" y="54" width="26" height="26" rx="3" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="522" y="54" width="26" height="26" rx="3" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="552" y="54" width="26" height="26" rx="3" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <text x="462" y="100" fill="var(--tx3)" font-family="'IBM Plex Mono', monospace" font-size="9.5">타일 배치 1×4</text>
+        <text x="462" y="116" fill="var(--tx3)" font-family="'IBM Plex Mono', monospace" font-size="9.5">유효 해상도 336×1344</text>
+        <text x="462" y="140" fill="var(--vis)" font-size="9.5">종횡비는 이 바깥 층이 담당합니다</text>
+
+        <line x1="10" y1="170" x2="670" y2="170" stroke="var(--line)"></line>
+
+        <text x="10" y="194" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="10.5">② 안쪽 층 · 패치 격자 — 타일 한 장 안에서만 정해집니다</text>
+
+        <rect x="10" y="210" width="112" height="112" rx="4" fill="var(--panel2)" stroke="var(--vis)"></rect>
+        <rect x="10" y="210" width="112" height="112" rx="4" fill="url(#pg3)" stroke="none"></rect>
+        <text x="66" y="340" text-anchor="middle" fill="var(--tx2)" font-size="9.5">타일 한 장 · 336×336</text>
+
+        <text x="142" y="234" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="13">336 ÷ 14 = 24</text>
+        <text x="142" y="252" fill="var(--tx2)" font-size="10">패치 크기 14px — ViT-L/14의 그 14입니다</text>
+        <text x="142" y="288" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="13">24 × 24 = 576 토큰</text>
+        <text x="142" y="306" fill="var(--tx2)" font-size="10">타일이 정사각이라 어느 타일이든 언제나 24×24</text>
+
+        <rect x="440" y="214" width="38" height="38" rx="3" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="483" y="214" width="38" height="38" rx="3" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="440" y="257" width="38" height="38" rx="3" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="483" y="257" width="38" height="38" rx="3" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <text x="459" y="238" text-anchor="middle" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="10">576</text>
+        <text x="502" y="238" text-anchor="middle" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="10">576</text>
+        <text x="459" y="281" text-anchor="middle" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="10">576</text>
+        <text x="502" y="281" text-anchor="middle" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="10">576</text>
+        <text x="536" y="262" text-anchor="middle" fill="var(--tx2)" font-size="14">+</text>
+        <rect x="550" y="236" width="42" height="42" rx="4" fill="var(--panel2)" stroke="var(--lang)" stroke-dasharray="4 3"></rect>
+        <text x="571" y="261" text-anchor="middle" fill="var(--lang)" font-family="'IBM Plex Mono', monospace" font-size="10">576</text>
+        <text x="516" y="320" text-anchor="middle" fill="var(--tx3)" font-size="9.5">타일마다 독립으로 576 · 축소본도 576</text>
+
+        <line x1="10" y1="356" x2="670" y2="356" stroke="var(--line)"></line>
+
+        <text x="10" y="380" fill="var(--tx3)" font-family="'IBM Plex Mono', monospace" font-size="10.5">③ 토큰 회계</text>
+        <text x="104" y="380" fill="var(--tx3)" font-size="9.5">— 패치 격자에 타일 배치를 곱하는 것이 아니라, 타일 4장과 축소본이 각자 576을 냅니다</text>
+        <text x="10" y="408" font-family="'IBM Plex Mono', monospace" font-size="13" fill="var(--tx2)">(2×2 + 1) × 576 = <tspan fill="var(--vis)" font-size="15">2,880 토큰</tspan></text>
+        <text x="10" y="428" fill="var(--tx3)" font-size="9.5">= (a×b + 1) × T 에서 a=2, b=2, T=576인 경우입니다</text>
+      </g>
+    </svg>
+    <p class="cap">두 층은 서로 곱해지지 않습니다. <b>바깥의 타일 배치</b>가 종횡비와 유효 해상도를 정하고, <b>안쪽의 패치 격자</b>는 타일 한 장 안에서 언제나 24×24입니다.</p>
+  </div>
+
+  <p>여기서 <strong>"격자"라는 한 단어가 두 층에 걸쳐 있다</strong>는 점을 분명히 해둡시다. 안쪽 패치 격자는 타일이 336×336 정사각이라 <strong>언제나 24×24로 고정</strong>이고, 타일이 늘어도 각 타일 안에서는 아무것도 달라지지 않습니다. 늘어나는 것은 <em>타일 수</em>뿐입니다. 그러니 <strong>종횡비를 담당하는 것은 안쪽이 아니라 바깥의 타일 배치</strong>입니다 — 가로로 긴 이미지에 1×4를 고르면 유효 해상도가 336×1344가 되어, 원본의 4:1이 눌리지 않고 그대로 들어갑니다. 같은 이미지를 336 한 장에 밀어 넣었다면 4:1이 1:1로 찌그러지거나, 레터박스 여백에 픽셀 예산의 4분의 3을 버렸을 것입니다.</p>
 
   <h3>3-2. 왜 축소본을 꼭 같이 넣을까요</h3>
   <p>타일만 넣으면 각 타일은 <em>자기 안쪽만</em> 봅니다. 어느 타일도 "이것이 영수증 한 장"이라는 사실을 모릅니다. 전역 축소본은 <strong>배치와 맥락</strong>을 담당합니다 — 세부는 타일이, 전체 구조는 축소본이. 검출에서 FPN이 저해상도 층으로 맥락을, 고해상도 층으로 작은 물체를 맡기는 분업과 발상이 같습니다.</p>
 
   <h3>3-3. InternVL의 dynamic high-resolution</h3>
   <p>InternVL 1.5는 같은 아이디어를 더 크게 밀었습니다. 448px 타일을 쓰고, 종횡비에 맞춰 <strong>타일 수 자체를 이미지마다 다르게</strong> 정합니다 — 학습 때 1~12장, 테스트에서는 최대 40장(대략 4K)까지 늘어납니다. 여기에 448px로 줄인 축소본을 더합니다.</p>
-  <p>448px 타일 하나는 32×32 = 1,024 패치입니다. 2장에서 본 <strong>pixel-shuffle</strong>로 2×2를 접어 <span class="tok v">타일당 256 토큰</span>으로 줄입니다. 그래서 학습 구간의 시각 토큰은 <strong>256에서 3,328 사이</strong>(3,328 = 13 × 256, 12타일 + 축소본)이고, 테스트에서 40타일까지 밀면 10,496개가 됩니다. 압축이 없었다면 같은 12타일 + 축소본이 13,312 토큰이었을 자리입니다.</p>
+  <p>448px 타일 하나는 같은 14px 패치로 448 ÷ 14 = 32, 즉 패치 격자 32×32 = 1,024 패치입니다. 2장에서 본 <strong>pixel-shuffle</strong>로 2×2를 접습니다 — 패치 4개가 토큰 하나가 되므로 <span class="tok v">1,024 ÷ 4 = 타일당 256 토큰</span>입니다. 그래서 학습 구간의 시각 토큰은 <strong>256에서 3,328 사이</strong>(3,328 = 13 × 256, 12타일 + 축소본)이고, 테스트에서 40타일까지 밀면 41 × 256 = 10,496개가 됩니다. 압축이 없었다면 같은 12타일 + 축소본이 13 × 1,024 = 13,312 토큰이었을 자리입니다.</p>
 
   <div class="note">
-    <b>타일 경계는 공짜가 아닙니다.</b> 글자나 물체가 타일 경계에 걸리면 두 타일로 쪼개져 각각 반쪽만 봅니다. 격자 후보를 여러 개 두고 종횡비로 고르는 이유의 절반이 이것이고, 나머지 절반은 빈 여백에 타일을 낭비하지 않기 위해서입니다.
+    <b>타일 경계는 공짜가 아닙니다.</b> 글자나 물체가 타일 경계에 걸리면 두 타일로 쪼개져 각각 반쪽만 봅니다. 타일 배치 후보를 여러 개 두고 종횡비로 고르는 이유의 절반이 이것이고, 나머지 절반은 빈 여백에 타일을 낭비하지 않기 위해서입니다.
   </div>
 
   <h2>4. 눌러 담기 — 압축과 정보 밀도</h2>
@@ -91,7 +199,7 @@
 
   <p>여기서 중요한 것은 표의 마지막 칸입니다. <strong>리샘플러를 쓰면 해상도를 올려도 LLM 비용이 늘지 않습니다.</strong> 대신 늘어난 픽셀이 고정된 M개 안으로 <em>들어갈 자리가 없습니다</em>. 비용을 상수로 만든 대가로 <strong>해상도를 올리는 의미까지 상당 부분 상수</strong>가 되어버리는 것입니다.</p>
   <p>Idefics2가 그 지점을 정직하게 기록했습니다. 학습된 풀링(perceiver)으로 이미지 한 장의 시각 토큰을 <strong>729개에서 64개로</strong> 줄였는데 평균 성능이 오히려 8.5점 올랐고, 저자들은 <em>"64개를 넘겨도 이득이 없었다"</em>고 적었습니다. 그런데 같은 논문의 다른 표를 보면 이야기가 갈립니다 — 이미지 분할을 켜서 토큰을 64에서 320으로 늘렸을 때 <strong>DocVQA는 67.3 → 74.0</strong>으로 뛰었지만 MMMU는 43.5 → 43.0, MathVista는 51.6 → 51.4로 오히려 미세하게 내려갔습니다. <strong>"토큰을 더 쓰면 좋은가"에 대한 답이 태스크마다 반대</strong>였던 것입니다. 이 장의 나머지가 전부 이 관찰의 연장입니다.</p>
-  <p>그래서 문서·OCR 계열은 리샘플러에서 멀어지고 pixel-shuffle로 몰렸습니다. Idefics3는 364×364 타일을 <strong>169 토큰</strong>으로(2×2 접기), SmolVLM은 더 세게 3×3으로 접어 384×384를 <strong>81 토큰</strong>으로 줄입니다. SmolVLM 논문이 남긴 말이 인상적입니다 — <em>"작은 VLM일수록 더 공격적인 시각 토큰 압축에서 이득을 본다."</em> 모델이 작을수록 긴 시퀀스를 감당할 여력이 없기 때문입니다.</p>
+  <p>그래서 문서·OCR 계열은 리샘플러에서 멀어지고 pixel-shuffle로 몰렸습니다. Idefics3는 364×364 타일을 <strong>169 토큰</strong>으로 줄입니다 — 역시 14px 패치라 364 ÷ 14 = 26, 패치 격자 26×26 = 676을 2×2로 접어 676 ÷ 4입니다. SmolVLM은 더 세게 3×3으로 접어 384×384를 <strong>81 토큰</strong>으로 줄입니다 — 9개가 하나로 접히니, 바로 앞 문단의 729가 729 ÷ 9로 내려앉은 것입니다. SmolVLM 논문이 남긴 말이 인상적입니다 — <em>"작은 VLM일수록 더 공격적인 시각 토큰 압축에서 이득을 본다."</em> 모델이 작을수록 긴 시퀀스를 감당할 여력이 없기 때문입니다.</p>
 
   <h3>4-1. 정보 밀도 — 토큰 하나가 담을 수 있는 양</h3>
   <p>pixel-shuffle이 "파라미터 0으로 토큰을 ¼"이라고 하면 공짜처럼 들리지만, 정확히는 <strong>토큰 축의 정보를 채널 축으로 옮긴 것</strong>입니다. 2×2를 접으면 채널이 4배가 됩니다. 그런데 프로젝터를 지나 LLM에 들어갈 때 차원은 <span class="tok l">d<sub>ℓ</sub></span>로 고정되어 있습니다. 접은 채널은 결국 그 폭 안으로 다시 눌립니다 — <strong>진짜 손실은 접을 때가 아니라 프로젝터에서</strong> 납니다.</p>
@@ -99,14 +207,14 @@
 
   <h2>5. 원본 모양 그대로 — 네이티브 해상도</h2>
   <p>타일링은 결국 "고정 크기 인코더"라는 제약을 우회하는 기술입니다. 그렇다면 그 제약을 없애면 어떨까요.</p>
-  <p><strong>Qwen2-VL</strong>은 <em>naive dynamic resolution</em>이라는 이름으로 이 길을 갔습니다. 이미지를 원본 종횡비 그대로 패치로 자르고, 나온 패치 수만큼의 토큰을 그대로 씁니다. 격자 크기에 묶인 절대 위치 임베딩을 <strong>지우고 2D-RoPE로 갈아끼웠기</strong> 때문에 격자가 몇 × 몇이든 상관이 없습니다. 인접한 2×2 토큰은 MLP로 하나로 합칩니다 — 패치가 14px이니 <strong>시각 토큰 하나가 28×28 픽셀</strong>에 대응하는 셈입니다.</p>
+  <p><strong>Qwen2-VL</strong>은 <em>naive dynamic resolution</em>이라는 이름으로 이 길을 갔습니다. 이미지를 원본 종횡비 그대로 패치로 자르고, 나온 패치 수만큼의 토큰을 그대로 씁니다. 패치 격자 크기에 묶인 절대 위치 임베딩을 <strong>지우고 2D-RoPE로 갈아끼웠기</strong> 때문에 패치 격자가 몇 × 몇이든 상관이 없습니다. 인접한 2×2 토큰은 MLP로 하나로 합칩니다 — 패치가 14px이니 <strong>시각 토큰 하나가 28×28 픽셀</strong>에 대응하는 셈입니다.</p>
   <p>논문이 든 예가 이 구조를 한 줄로 설명합니다. 224×224 이미지는 패치 16×16 = 256개 → 2×2 병합으로 64개 → 여기에 <code>vision_start</code>·<code>vision_end</code> 특수 토큰 둘이 붙어 <strong>66 토큰</strong>. 크기가 다른 이미지는 그냥 다른 수가 나옵니다.</p>
   <p>계보를 따지면 이 발상의 뿌리는 <strong>NaViT</strong>의 <em>patch n' pack</em>입니다. 길이가 제각각인 이미지 시퀀스들을 한 배치에 욱여넣어(pack) 학습하는 방법으로, "모든 이미지를 같은 정사각형으로" 라는 전제를 처음 걷어낸 쪽입니다.</p>
   <p>장점은 분명합니다. 종횡비가 보존되고, 타일 경계가 없고, 작은 이미지에는 적은 토큰만 씁니다. 그런데 <strong>실무에서 이 구조가 위험해지는 지점</strong>도 정확히 거기에 있습니다.</p>
   <div class="note">
     <b>네이티브 해상도 모델을 서빙에 올릴 때 가장 먼저 볼 설정은 이미지당 토큰 상한입니다.</b> 상한을 걸지 않으면 사용자가 올린 4K 스크린샷 <em>한 장</em>이 컨텍스트를 통째로 먹고, 그 요청 하나가 배치 전체의 지연을 끌어내립니다. Qwen2-VL은 이 상한을 <code>min_pixels</code>·<code>max_pixels</code>로 노출하는데, 단위가 바로 앞에서 본 <b>28×28 = 토큰 하나</b>입니다. 공식 모델 카드의 기본 범위는 이미지당 <b>4~16,384 토큰</b>이고, 카드 자체가 <em>"필요에 따라 256~1,280 같은 범위로 좁혀 쓰라"</em>고 권합니다. 기본값을 그대로 배포하지 말고, 내 이미지 분포에 맞춰 반드시 다시 잡으십시오.
   </div>
-  <p>정리하면 지난 몇 년의 흐름은 <strong>고정 224 → 타일 격자 → 가변 길이</strong>였고, 세 단계 모두 답한 질문은 같습니다. "이 이미지에 토큰을 몇 개 쓸 것인가."</p>
+  <p>정리하면 지난 몇 년의 흐름은 <strong>고정 224 → 타일 배치 → 가변 길이</strong>였고, 세 단계 모두 답한 질문은 같습니다. "이 이미지에 토큰을 몇 개 쓸 것인가."</p>
 
   <h2>6. 무릎 — 어디서 멈출 것인가</h2>
   <p>해상도를 올리면 성능은 오릅니다. 다만 <strong>영원히 오르지는 않습니다.</strong> 곡선은 대체로 이렇게 생겼습니다 — 어느 지점까지는 가파르게 오르다가, 어느 지점을 지나면 눕습니다. 그 꺾이는 자리를 이 장에서는 <strong>무릎(knee)</strong>이라고 부르겠습니다.</p>
@@ -237,7 +345,7 @@
   </ul>
 
   <div class="note">
-    <b>검출 엔지니어를 위한 대응표.</b> <code>imgsz</code> = 이미지당 토큰 상한, <code>letterbox</code> = AnyRes 격자 후보(종횡비를 어떻게 맞출 것인가), <code>FPN의 다층 구조</code> = 축소본 + 타일(맥락과 세부의 분업), <code>배치 크기</code> = 컨텍스트 길이. 스윕을 돌리는 습관은 그대로 쓰되, <b>기록할 축이 하나 늘었다</b>고 생각하면 됩니다 — 토큰 수.
+    <b>검출 엔지니어를 위한 대응표.</b> <code>imgsz</code> = 이미지당 토큰 상한, <code>letterbox</code> = AnyRes 타일 배치 후보(종횡비를 어떻게 맞출 것인가), <code>FPN의 다층 구조</code> = 축소본 + 타일(맥락과 세부의 분업), <code>배치 크기</code> = 컨텍스트 길이. 스윕을 돌리는 습관은 그대로 쓰되, <b>기록할 축이 하나 늘었다</b>고 생각하면 됩니다 — 토큰 수.
   </div>
 
   <div class="lab">
@@ -325,7 +433,7 @@
       <button type="button" data-a="1">2,880개 — 타일 4장에 축소본 1장을 더해 576 × 5입니다</button>
       <button type="button" data-a="0">2,304개 — 타일 4장이므로 576 × 4이고, 축소본은 토큰을 쓰지 않습니다</button>
     </div>
-    <div class="expl" id="e1">타일 하나가 336px = 24×24 격자 = <b>576 토큰</b>이고, 2×2 격자면 타일이 4장, 여기에 전역 축소본 1장이 더 붙어 총 5장 — <b>2,880 토큰</b>입니다. 축소본도 똑같이 인코더를 통과하므로 당연히 토큰을 씁니다. 그리고 어텐션 비용은 토큰 수의 제곱이므로, 5배가 아니라 <b>25배 쪽</b>으로 갑니다.</div>
+    <div class="expl" id="e1">타일 하나가 336px = 패치 격자 24×24 = <b>576 토큰</b>이고, 타일 배치 2×2면 타일이 4장, 여기에 전역 축소본 1장이 더 붙어 총 5장 — <b>2,880 토큰</b>입니다. 축소본도 똑같이 인코더를 통과하므로 당연히 토큰을 씁니다. 그리고 어텐션 비용은 토큰 수의 제곱이므로, 5배가 아니라 <b>25배 쪽</b>으로 갑니다.</div>
   </div>
   <div class="lab">
     <div class="lab-tag">QUIZ 3-2</div>
@@ -341,18 +449,18 @@
     <div class="lab-tag">QUIZ 3-3</div>
     <p class="q">Qwen2-VL처럼 원본 해상도를 그대로 받는 모델을 실제 서비스에 올리려 합니다. 배포 전 가장 먼저 확인해야 할 것은 무엇일까요?</p>
     <div class="opts" id="q3">
-      <button type="button" data-a="0">타일 격자 후보 목록 — 종횡비별로 몇 × 몇 격자를 쓸지 정해야 합니다</button>
+      <button type="button" data-a="0">타일 배치 후보 목록 — 종횡비별로 몇 × 몇 배치를 쓸지 정해야 합니다</button>
       <button type="button" data-a="1">이미지당 토큰(픽셀) 상한 — 상한이 없으면 큰 이미지 한 장이 컨텍스트와 지연을 통째로 먹습니다</button>
-      <button type="button" data-a="0">위치 임베딩 테이블의 크기 — 격자가 커지면 테이블을 보간해 늘려야 합니다</button>
+      <button type="button" data-a="0">위치 임베딩 테이블의 크기 — 패치 격자가 커지면 테이블을 보간해 늘려야 합니다</button>
     </div>
-    <div class="expl" id="e3">네이티브 해상도의 장점(이미지마다 토큰이 다름)이 그대로 운영 리스크가 됩니다. <b>상한을 걸지 않으면 4K 스크린샷 한 장이 배치 전체의 p95 지연을 끌어내립니다.</b> 격자 후보는 타일링 계열의 개념이라 여기서는 쓰지 않고, 2D RoPE를 쓰는 구조라 보간할 위치 임베딩 테이블 자체가 없습니다.</div>
+    <div class="expl" id="e3">네이티브 해상도의 장점(이미지마다 토큰이 다름)이 그대로 운영 리스크가 됩니다. <b>상한을 걸지 않으면 4K 스크린샷 한 장이 배치 전체의 p95 지연을 끌어내립니다.</b> 타일 배치 후보는 타일링 계열의 개념이라 여기서는 쓰지 않고, 2D RoPE를 쓰는 구조라 보간할 위치 임베딩 테이블 자체가 없습니다.</div>
   </div>
 
   <div class="refs">
     <h2>더 읽을거리</h2>
     <ol>
       <li>Liu et al., <a href="https://arxiv.org/abs/2310.03744">Improved Baselines with Visual Instruction Tuning (LLaVA-1.5)</a>, 2023 — CLIP ViT-L/14-336px 고정 입력. 논문은 해상도만 적고 토큰 수는 적지 않습니다. 576 = (336/14)²이 표로 인쇄된 곳은 <a href="https://arxiv.org/abs/2406.16860">Cambrian-1</a> Table 10과 <a href="https://llava-vl.github.io/blog/2024-05-25-llava-next-ablations/">LLaVA-NeXT 어블레이션 블로그</a>입니다.</li>
-      <li>Liu et al., <a href="https://llava-vl.github.io/blog/2024-01-30-llava-next/">LLaVA-NeXT</a>, 2024 — AnyRes 격자 후보와 "픽셀 4배". 토큰 회계식 <code>L=(a×b+1)×T</code>는 <a href="https://arxiv.org/abs/2408.03326">LLaVA-OneVision</a>에, 최대 2,880이라는 수는 MM1·Cambrian-1·Idefics2에 인쇄되어 있습니다.</li>
+      <li>Liu et al., <a href="https://llava-vl.github.io/blog/2024-01-30-llava-next/">LLaVA-NeXT</a>, 2024 — AnyRes 타일 배치 후보와 "픽셀 4배". 토큰 회계식 <code>L=(a×b+1)×T</code>는 <a href="https://arxiv.org/abs/2408.03326">LLaVA-OneVision</a>에, 최대 2,880이라는 수는 MM1·Cambrian-1·Idefics2에 인쇄되어 있습니다.</li>
       <li>Chen et al., <a href="https://arxiv.org/abs/2404.16821">How Far Are We to GPT-4V? (InternVL 1.5)</a>, 2024 — 448px 타일 동적 분할(학습 1~12, 테스트 40), 축소본, pixel-shuffle로 타일당 256 토큰, 시각 토큰 256~3,328.</li>
       <li>Wang et al., <a href="https://arxiv.org/abs/2409.12191">Qwen2-VL</a>, 2024 — naive dynamic resolution, 2D-RoPE, 2×2 병합, 그리고 이 장 6-1의 토큰 예산 표(Table 7). 그 앞의 계보로 Dehghani et al., <a href="https://arxiv.org/abs/2307.06304">NaViT: Patch n' Pack</a>, NeurIPS 2023.</li>
       <li>압축의 계보 — Jaegle et al., <a href="https://arxiv.org/abs/2103.03206">Perceiver</a>, ICML 2021 · Alayrac et al., <a href="https://arxiv.org/abs/2204.14198">Flamingo</a>, NeurIPS 2022(64개 고정) · Laurençon et al., <a href="https://arxiv.org/abs/2405.02246">Idefics2</a>, NeurIPS 2024(729→64 학습된 풀링, "64를 넘겨도 이득 없음") · <a href="https://arxiv.org/abs/2408.12637">Idefics3</a>, 2024(리샘플러를 버리고 pixel-shuffle로, 364² → 169 토큰).</li>

@@ -39,7 +39,7 @@
         <div class="stat">
           이미지 토큰 <b id="ntok">441</b><br>
           어텐션 비용(토큰²) <span id="cost" class="warn">194k</span><br>
-          격자 <span id="grid">21 × 21</span>
+          패치 격자 <span id="grid">21 × 21</span>
         </div>
       </div>
     </div>
@@ -60,7 +60,7 @@
       <button type="button" data-a="1">2,304개 — (672÷14)²</button>
       <button type="button" data-a="0">196개 — 표준 ViT는 항상 196개</button>
     </div>
-    <div class="expl" id="e1">한 변이 672÷14 = 48패치, 격자는 48×48이므로 <b>2,304개</b>입니다. 토큰 수는 항상 "한 변의 패치 수의 제곱"으로 뛴다는 감각이 이 장의 핵심입니다.</div>
+    <div class="expl" id="e1">한 변이 672÷14 = 48패치, 패치 격자는 48×48이므로 <b>2,304개</b>입니다. 토큰 수는 항상 "한 변의 패치 수의 제곱"으로 뛴다는 감각이 이 장의 핵심입니다.</div>
   </div>
   <div class="lab">
     <div class="lab-tag">QUIZ 1-2</div>
@@ -70,7 +70,7 @@
       <button type="button" data-a="0">토큰 수는 같고 각 토큰이 더 똑똑해집니다</button>
       <button type="button" data-a="0">어텐션 비용이 2배가 됩니다</button>
     </div>
-    <div class="expl" id="e2">패치가 커지면 격자가 성겨져 토큰이 ¼(비용은 ~1/16)이 되지만, 패치 하나가 32×32 영역을 통째로 요약해야 하므로 <b>세밀한 검출력이 희생됩니다</b>. 속도와 시력의 맞교환입니다.</div>
+    <div class="expl" id="e2">패치가 커지면 패치 격자가 성겨져 토큰이 ¼(비용은 ~1/16)이 되지만, 패치 하나가 32×32 영역을 통째로 요약해야 하므로 <b>세밀한 검출력이 희생됩니다</b>. 속도와 시력의 맞교환입니다.</div>
   </div>
 
   <div class="refs">

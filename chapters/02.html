@@ -137,7 +137,7 @@
   <div class="lab">
     <div class="lab-tag">LAB 2-2 · 개수를 바꾸는 다리</div>
     <h3>어댑터별 출력 토큰 수</h3>
-    <p class="hint">같은 시각 토큰 격자를 세 어댑터에 통과시켰을 때 LLM이 실제로 받는 토큰 수입니다. 리샘플러만 격자 크기와 무관하게 평평합니다.</p>
+    <p class="hint">같은 시각 토큰 격자를 세 어댑터에 통과시켰을 때 LLM이 실제로 받는 토큰 수입니다. 리샘플러만 패치 격자 크기와 무관하게 평평합니다.</p>
     <div class="row">
       <div class="ctl" style="min-width:260px">
         <div><label for="ad_grid">패치 격자 <b id="ad_gridv">32 × 32</b></label>
@@ -153,7 +153,7 @@
       </div>
       <div class="ctl" id="ad_bars"></div>
     </div>
-    <p class="hint" style="margin:14px 0 0">격자를 64×64까지 밀어 보세요. 1:1 어댑터는 4천 토큰을 그대로 LLM에 부어 넣지만 리샘플러는 64개입니다 — <b>그리고 그 차이만큼의 정보가 어딘가에서 사라집니다.</b></p>
+    <p class="hint" style="margin:14px 0 0">패치 격자를 64×64까지 밀어 보세요. 1:1 어댑터는 4천 토큰을 그대로 LLM에 부어 넣지만 리샘플러는 64개입니다 — <b>그리고 그 차이만큼의 정보가 어딘가에서 사라집니다.</b></p>
   </div>
 
   <h2>6. 다리가 병목이 될 때</h2>
