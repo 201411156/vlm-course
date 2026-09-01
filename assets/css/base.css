@@ -224,3 +224,80 @@ footer{border-top:1px solid var(--line);margin-top:60px;padding-top:18px;
 .skip{position:absolute;left:-9999px}
 .skip:focus{left:8px;top:8px;z-index:10;background:var(--panel);color:var(--tx);
   padding:8px 12px;border-radius:8px;border:1px solid var(--vis)}
+
+/* ==========================================================================
+   용어 툴팁 · 용어집
+   ========================================================================== */
+abbr.gl{
+  text-decoration:none;
+  border-bottom:1px dotted var(--tx3);
+  cursor:help;
+  padding-bottom:.5px;
+}
+abbr.gl:hover,abbr.gl.on{border-bottom-color:var(--vis);color:var(--vis)}
+abbr.gl:focus-visible{outline:2px solid var(--vis);outline-offset:2px;border-radius:2px}
+
+.glpop{
+  position:absolute;z-index:60;max-width:330px;
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  box-shadow:0 6px 24px rgba(0,0,0,.28);
+  padding:13px 15px;font-size:13.5px;line-height:1.65;color:var(--tx2);
+}
+:root[data-theme="light"] .glpop{box-shadow:0 6px 22px rgba(30,28,20,.13)}
+@media (prefers-color-scheme: light){
+  :root:not([data-theme="dark"]) .glpop{box-shadow:0 6px 22px rgba(30,28,20,.13)}
+}
+.glpop b{display:block;color:var(--tx);font-size:14.5px;font-weight:700}
+.glpop .alt{display:block;font-family:'IBM Plex Mono',monospace;font-size:11px;
+  color:var(--tx3);letter-spacing:.04em;margin-top:1px}
+.glpop p{margin:8px 0 0;max-width:none}
+.glpop .bridge{color:var(--vis);font-size:13px}
+.glpop .bridge::before{content:"↳ ";opacity:.7}
+.glpop a{display:inline-block;margin-top:10px;font-size:12.5px;text-decoration:none;
+  font-family:'IBM Plex Mono',monospace}
+
+/* 장 끝 "이 장의 용어" */
+details.glbox{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:14px 18px;margin:40px 0 0}
+details.glbox summary{cursor:pointer;font-family:'Gowun Batang',serif;font-size:16px;
+  color:var(--tx);list-style:none}
+details.glbox summary::-webkit-details-marker{display:none}
+details.glbox summary::before{content:"▸ ";color:var(--tx3);font-family:'IBM Plex Mono',monospace}
+details.glbox[open] summary::before{content:"▾ "}
+details.glbox summary span{font-family:'IBM Plex Mono',monospace;font-size:11.5px;
+  color:var(--tx3);margin-left:6px}
+details.glbox ul{margin:14px 0 0;padding-left:18px;font-size:13.5px;color:var(--tx2)}
+details.glbox li{margin:9px 0}
+details.glbox li b{color:var(--tx)}
+details.glbox li i{color:var(--vis);font-style:normal}
+details.glbox .more{margin:14px 0 0;font-size:12.5px}
+details.glbox .more a{text-decoration:none;font-family:'IBM Plex Mono',monospace}
+
+/* 용어집 페이지 */
+.glsearch{width:100%;max-width:420px;background:var(--panel);color:var(--tx);
+  border:1px solid var(--line);border-radius:8px;padding:10px 14px;font:inherit;font-size:14px}
+.glsearch:focus{outline:none;border-color:var(--vis)}
+.glcount{font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--tx3);margin:10px 0 0}
+.glgroup{margin:34px 0 0}
+.glgroup h2{font-size:17px;margin:0 0 4px}
+.glgroup .k{font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.14em;
+  color:var(--vis);text-transform:uppercase}
+.gllist{list-style:none;padding:0;margin:14px 0 0}
+.gllist li{border-top:1px solid var(--line);padding:14px 0}
+.gllist li:first-child{border-top:none}
+.gllist .term{color:var(--tx);font-weight:700;font-size:15px}
+.gllist .alt{font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--tx3);
+  margin-left:8px}
+.gllist .ch{float:right;font-family:'IBM Plex Mono',monospace;font-size:11px;
+  color:var(--tx3);text-decoration:none;border:1px solid var(--line);border-radius:999px;
+  padding:2px 9px}
+.gllist .ch:hover{border-color:var(--vis);color:var(--vis)}
+.gllist p{margin:6px 0 0;color:var(--tx2);font-size:14px;max-width:66ch}
+.gllist .bridge{color:var(--vis);font-size:13.5px}
+.gllist .bridge::before{content:"↳ ";opacity:.7}
+.gllist li:target{background:var(--panel);border-radius:8px;
+  box-shadow:0 0 0 2px var(--vis);padding-left:12px;padding-right:12px}
+.glempty{color:var(--tx3);margin:30px 0;font-size:14px}
+nav.rail a.extra{margin-top:10px;border-top:1px solid var(--line);padding-top:12px}
+nav.rail a.extra .n{color:var(--lang)}
+nav.rail a.extra.on .n{color:var(--vis)}

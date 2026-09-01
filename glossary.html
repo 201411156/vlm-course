@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>용어집 — VLM 워크북</title>
+<meta name="description" content="VLM 워크북 14장에 나오는 약어·연산·방법론 용어를 한자리에 모은 용어집입니다.">
+<script>try{var t=localStorage.getItem('vlmwb_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="assets/css/base.css">
+</head>
+<body>
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+<div class="wrap">
+<nav class="rail" aria-label="목차"></nav>
+
+<main id="main">
+  <div class="eyebrow">GLOSSARY</div>
+  <h1>용어집</h1>
+  <p class="lede">14장에 나오는 약어와 연산, 방법론을 한자리에 모았습니다. 본문에서 <abbr class="gl" style="cursor:default">점선 밑줄</abbr>이 그어진 낱말에 마우스를 올리거나 탭하면 같은 설명이 그 자리에서 뜹니다.</p>
+
+  <div>
+    <label for="glq" style="display:block;font-size:13px;color:var(--tx2);margin-bottom:6px">검색</label>
+    <input type="search" id="glq" class="glsearch" placeholder="용어, 설명, 분류로 검색 (예: 양자화, argmax, 평가)" autocomplete="off">
+    <p class="glcount" id="glcount"></p>
+  </div>
+
+  <div id="glbody"></div>
+
+  <footer>VLM 워크북 · 개인 학습 노트 · 공개 문헌과 공개 모델만 다룹니다.</footer>
+</main>
+</div>
+
+<script defer src="assets/js/glossary.js"></script>
+<script defer src="assets/js/site.js"></script>
+<script defer src="assets/js/glossary-page.js"></script>
+</body>
+</html>
