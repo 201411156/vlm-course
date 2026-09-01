@@ -10,6 +10,13 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
 <link rel="stylesheet" href="../assets/css/base.css">
+<style>
+  /* 1장 전용 — 공용 자산은 건드리지 않습니다 */
+  .fig{margin:26px 0;background:var(--panel);border:1px solid var(--line);
+    border-radius:10px;padding:16px;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;min-width:600px;max-width:100%;height:auto}
+  .fig .cap{color:var(--tx3);font-size:12.5px;margin:12px auto 0;text-align:center;max-width:62ch}
+</style>
 </head>
 <body data-chapter="01">
 <a class="skip" href="#main">본문으로 건너뛰기</a>
@@ -47,11 +54,181 @@
     <p class="hint" style="margin:10px 0 0">위 칩들이 LLM이 실제로 받는 시퀀스입니다 — <span class="tok l">텍스트 토큰</span> 뒤에 <span class="tok v">이미지 토큰</span>이 그냥 이어붙습니다.</p>
   </div>
 
-  <h2>2. 왜 "제곱"이 무서운가</h2>
+
+  <h2>2. 패치 하나가 벡터가 되기까지</h2>
+  <p>격자를 긋고 조각을 세는 데까지는 왔습니다. 그런데 그 조각 하나는 모델 안에서 <strong>정확히 무엇이 될까요?</strong> 이 자리를 건너뛰면 다음 장부터 나오는 1024, <code>Conv2d</code>, 축소본이 차례로 발목을 잡습니다. 조각 하나를 끝까지 따라가 보겠습니다.</p>
+
+  <h3>2-1. 원재료는 숫자 588개</h3>
+  <p>패치 크기가 14픽셀이라고 해봅시다. 조각 하나는 가로 14 × 세로 14 픽셀이고, 컬러 이미지이니 픽셀마다 R·G·B 세 값이 있습니다. 곱하면 <span class="tok v">14 × 14 × 3 = 588</span> — 조각 하나가 들고 있는 것은 <strong>숫자 588개</strong>가 전부입니다.</p>
+
+  <h3>2-2. patch embedding — 588을 d<sub>v</sub>로 바꾸기</h3>
+  <p>이 588개를 그대로 트랜스포머에 넣지는 않습니다. 학습된 선형 변환 하나를 통과시켜 정해진 길이의 벡터로 바꿉니다. 이 변환을 <strong>patch embedding</strong>이라 부르고, 바뀐 뒤의 길이를 이 워크북에서는 <span class="tok v">d<sub>v</sub></span>라고 쓰겠습니다.</p>
+  <p>구현은 대개 한 줄입니다. 그리고 이 한 줄이 자주 오해를 삽니다.</p>
+  <pre><code>nn.Conv2d(3, 1024, kernel_size=14, stride=14)</code></pre>
+  <p>앞자리에 <code>3</code>이 있으니 "3×3 커널을 1024개 쓴다"로 읽기 쉬운데, 그 자리는 커널 크기가 아닙니다. 자리마다 뜻이 다릅니다.</p>
+
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>자리</th><th>값</th><th>뜻</th></tr></thead>
+    <tbody>
+      <tr><td>첫 번째 인자</td><td class="num">3</td><td><b>입력 채널</b> — RGB 세 장이라는 뜻입니다. 커널 크기가 아닙니다.</td></tr>
+      <tr><td>두 번째 인자</td><td class="num">1024</td><td><b>커널 개수</b> = 출력 채널 = d<sub>v</sub></td></tr>
+      <tr><td><code>kernel_size</code></td><td class="num">14</td><td>커널 한 변이 14픽셀</td></tr>
+      <tr><td><code>stride</code></td><td class="num">14</td><td>14픽셀씩 건너뜁니다 — 그래서 겹치지 않습니다</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>그러니 <strong>커널 하나의 모양은 (3, 14, 14)</strong>입니다. 원소를 세면 3 × 14 × 14 = <span class="tok v">588개의 가중치</span> — 바로 앞에서 센 조각 하나의 원재료 수와 정확히 같습니다. 커널 하나가 조각 하나를 통째로 덮으니 당연한 일입니다.</p>
+  <p>그런 커널이 1024개 있습니다. 각 커널이 같은 조각과 한 번씩 내적을 하므로, <strong>조각 하나에서 나오는 숫자는 1024개</strong>가 됩니다. 행렬로 쓰면 <code>(1024, 588) @ (588,) → (1024,)</code>, 그냥 선형 변환 한 번입니다. 학습 파라미터는 1024 × 588 + 1024(편향) = <span class="tok v">603,136개</span>, 약 60만 개입니다.</p>
+
+  <h3>2-3. kernel = stride라서 "자르기"가 됩니다</h3>
+  <p>익숙한 conv를 떠올려 보십시오. <code>kernel_size=3, stride=1</code>이면 커널이 한 픽셀씩 미끄러지며 이웃한 위치끼리 입력을 <em>겹쳐서</em> 봅니다. 출력 한 칸이 입력의 어느 조각 하나에 대응한다고 말하기 어렵습니다.</p>
+  <p>patch embedding은 다릅니다. <code>kernel_size</code>와 <code>stride</code>가 둘 다 14이므로 커널이 자기 폭만큼 건너뜁니다. <strong>겹치는 구간이 0</strong>이고, 출력 한 칸이 입력의 14×14 조각 하나와 <strong>1:1로 정확히 대응</strong>합니다. 연산은 conv지만 하는 일은 <strong>잘라서 벡터로 펴기</strong>입니다 — 그래서 같은 동작을 "이미지를 조각낸다"고 설명해도 틀리지 않습니다.</p>
+  <p>336px 입력이면 출력 특징맵이 24×24칸, 칸마다 채널이 1024개입니다. 공간 축 둘을 펴면 <span class="tok v">(576, 1024)</span> — <strong>토큰 576개, 각각 1024차원</strong>이 됩니다.</p>
+
+  <h3>2-4. 1024는 어디서 나온 숫자일까요</h3>
+  <p>여기서 두 숫자의 성격이 완전히 다르다는 점을 짚어야 합니다.</p>
+  <ul>
+    <li><strong>576은 계산 결과입니다.</strong> (336 ÷ 14)² — 입력 크기와 패치 크기를 정하는 순간 자동으로 따라 나옵니다. 고를 여지가 없습니다.</li>
+    <li><strong>1024는 계산 결과가 아닙니다.</strong> 커널을 몇 개 둘지 사람이 고른 <strong>설계값</strong>입니다. 336에서도 14에서도 유도되지 않습니다.</li>
+  </ul>
+  <p>그 설계값은 대개 <strong>인코더 체급</strong>과 함께 정해집니다. 모델 이름에 붙는 B·L·H가 곧 아래 표의 행입니다.</p>
+
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>비전 인코더</th><th>패치 크기</th><th>d<sub>v</sub></th><th>블록 층수</th></tr></thead>
+    <tbody>
+      <tr><td>ViT-B/16</td><td class="num">16px</td><td class="num">768</td><td class="num">12</td></tr>
+      <tr><td>ViT-L/14</td><td class="num">14px</td><td class="num"><b>1024</b></td><td class="num">24</td></tr>
+      <tr><td>ViT-H/14</td><td class="num">14px</td><td class="num">1280</td><td class="num">32</td></tr>
+      <tr><td>SigLIP-SO400M/14</td><td class="num">14px</td><td class="num">1152</td><td class="num">27</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>CLIP <code>ViT-L/14</code>가 1024차원인 것은 <strong>L 체급이기 때문</strong>이고, <code>/14</code>는 패치 한 변이 14픽셀이라는 표기입니다. 해상도를 336에서 672로 올려도 늘어나는 것은 <em>토큰 수</em>뿐이고 1024는 그대로입니다 — 둘은 서로 다른 노브입니다.</p>
+
+  <h3>2-5. 인코더를 지나도 모양은 그대로, 내용은 달라집니다</h3>
+  <p>patch embedding을 지난 (576, 1024)에 위치 임베딩을 더하고, 트랜스포머 블록을 24층 통과시킵니다. 여기서 중요한 사실 하나 — <strong>블록은 토큰 수도 차원도 바꾸지 않습니다.</strong> 들어간 모양 그대로 나옵니다. 그래서 인코더의 최종 출력도 여전히 <span class="tok v">(576, 1024)</span>입니다. 2장에서 "CLIP ViT-L/14의 출력은 1024차원"이라고 할 때의 그 1024가 이것입니다.</p>
+  <p>모양이 그대로라고 해서 내용까지 그대로인 것은 아닙니다. 블록마다 <strong>self-attention</strong>이 토큰 576개 전부를 서로 참조하게 만듭니다. <strong>한 층만 지나도 모든 토큰이 이미지 전체를 한 번씩 훑은 상태</strong>가 됩니다.</p>
+  <p>CNN과 견주면 차이가 뚜렷합니다. 3×3 conv를 한 층 쌓을 때마다 receptive field는 상하좌우로 한 칸씩 넓어질 뿐이라, 화면 반대편까지 보려면 층을 한참 쌓아 올려야 합니다. ViT는 그럴 필요가 없습니다 — <strong>첫 층부터 전역</strong>입니다.</p>
+  <p>그래서 "토큰 하나에 14×14 값이 들어 있다"는 문장은 절반만 맞습니다. 정확히는 이렇습니다.</p>
+  <blockquote>토큰 하나가 <b>담당하는 위치</b>는 그 14×14 조각이고, 토큰 하나에 <b>담긴 내용</b>은 이미지 전체의 맥락이 섞인 숫자 1,024개입니다.</blockquote>
+
+  <div class="fig">
+    <svg viewBox="0 0 680 420" role="img" aria-label="14×14 조각이 588개 픽셀에서 1024개 숫자가 되고, 인코더 24층을 지나도 모양이 유지되는 과정을 보여주는 도해">
+      <defs>
+        <marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,1 L9,5 L0,9 z" fill="var(--tx3)"></path>
+        </marker>
+        <pattern id="pg1" width="11.5" height="11.5" patternUnits="userSpaceOnUse" patternTransform="translate(10 34)">
+          <path d="M11.5 0 L0 0 L0 11.5" fill="none" stroke="var(--vis)" stroke-width="0.5" opacity="0.55"></path>
+        </pattern>
+      </defs>
+      <g font-family="'IBM Plex Sans KR', system-ui, sans-serif" font-size="10.5">
+
+        <text x="10" y="20" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="10.5">① 조각 하나 — 픽셀 588개가 숫자 1024개가 됩니다</text>
+
+        <rect x="10" y="34" width="92" height="92" rx="4" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <rect x="10" y="34" width="92" height="92" rx="4" fill="url(#pg1)" stroke="none"></rect>
+        <rect x="44" y="68" width="11.5" height="11.5" fill="var(--vis)" opacity="0.85"></rect>
+        <text x="56" y="146" text-anchor="middle" fill="var(--tx2)" font-size="9.5">원본 336×336</text>
+
+        <line x1="106" y1="80" x2="122" y2="80" stroke="var(--tx3)" marker-end="url(#ah1)"></line>
+
+        <rect x="126" y="56" width="48" height="48" rx="4" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <text x="150" y="76" text-anchor="middle" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="10">14×14</text>
+        <text x="150" y="92" text-anchor="middle" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="10">×3 RGB</text>
+        <text x="150" y="146" text-anchor="middle" fill="var(--tx2)" font-size="9.5">조각 하나</text>
+
+        <line x1="178" y1="80" x2="194" y2="80" stroke="var(--tx3)" marker-end="url(#ah1)"></line>
+
+        <rect x="198" y="34" width="16" height="92" rx="2" fill="var(--panel2)" stroke="var(--vis)"></rect>
+        <line x1="198" y1="57" x2="214" y2="57" stroke="var(--vis)" stroke-width="0.5" opacity="0.5"></line>
+        <line x1="198" y1="80" x2="214" y2="80" stroke="var(--vis)" stroke-width="0.5" opacity="0.5"></line>
+        <line x1="198" y1="103" x2="214" y2="103" stroke="var(--vis)" stroke-width="0.5" opacity="0.5"></line>
+        <text x="206" y="146" text-anchor="middle" fill="var(--tx2)" font-size="9.5">588개</text>
+
+        <line x1="218" y1="80" x2="238" y2="80" stroke="var(--tx3)" marker-end="url(#ah1)"></line>
+
+        <rect x="242" y="44" width="174" height="72" rx="6" fill="var(--panel)" stroke="var(--vis)"></rect>
+        <text x="329" y="64" text-anchor="middle" fill="var(--vis)" font-size="10.5">patch embedding</text>
+        <text x="329" y="82" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="9.5">Conv2d(3, 1024, k=14, s=14)</text>
+        <text x="329" y="102" text-anchor="middle" fill="var(--tx3)" font-size="9">커널 1024개 · 각 588 가중치</text>
+
+        <line x1="420" y1="80" x2="436" y2="80" stroke="var(--tx3)" marker-end="url(#ah1)"></line>
+
+        <rect x="440" y="26" width="18" height="108" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <text x="449" y="146" text-anchor="middle" fill="var(--tx2)" font-size="9.5">1024개</text>
+
+        <text x="474" y="70" fill="var(--tx2)" font-size="10">토큰 하나 =</text>
+        <text x="474" y="87" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="11">숫자 1,024개</text>
+        <text x="474" y="106" fill="var(--tx3)" font-size="9">담당 영역은 14×14</text>
+
+        <line x1="10" y1="162" x2="670" y2="162" stroke="var(--line)"></line>
+
+        <text x="10" y="184" fill="var(--lang)" font-family="'IBM Plex Mono', monospace" font-size="10.5">② 시그니처 읽는 법 — 커널 하나의 모양과, kernel = stride</text>
+
+        <rect x="14" y="200" width="40" height="40" rx="3" fill="var(--panel2)" stroke="var(--vis)"></rect>
+        <rect x="21" y="207" width="40" height="40" rx="3" fill="var(--panel2)" stroke="var(--vis)"></rect>
+        <rect x="28" y="214" width="40" height="40" rx="3" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <text x="48" y="238" text-anchor="middle" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="9">14×14</text>
+
+        <text x="86" y="212" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">커널 하나 = (3, 14, 14)</text>
+        <text x="86" y="230" fill="var(--tx2)" font-size="9.5">= 3 × 14 × 14 = 588개의 가중치</text>
+        <text x="86" y="248" fill="var(--tx2)" font-size="9.5">커널 1024개 → 1024×588 + 1024 ≈ 60만 파라미터</text>
+
+        <line x1="352" y1="192" x2="352" y2="286" stroke="var(--line)"></line>
+
+        <text x="368" y="206" fill="var(--tx3)" font-size="9.5">일반 conv · k=3, s=1 — 창이 겹칩니다</text>
+        <rect x="368" y="216" width="200" height="12" rx="2" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <rect x="370" y="212" width="44" height="20" rx="3" fill="none" stroke="var(--lang)" stroke-dasharray="3 2"></rect>
+        <rect x="394" y="212" width="44" height="20" rx="3" fill="none" stroke="var(--lang)" stroke-dasharray="3 2"></rect>
+        <rect x="418" y="212" width="44" height="20" rx="3" fill="none" stroke="var(--lang)" stroke-dasharray="3 2"></rect>
+
+        <text x="368" y="256" fill="var(--tx3)" font-size="9.5">patch embedding · k = s = 14 — 딱 맞게 잘립니다</text>
+        <rect x="368" y="266" width="200" height="12" rx="2" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <rect x="368" y="262" width="50" height="20" rx="3" fill="none" stroke="var(--vis)"></rect>
+        <rect x="418" y="262" width="50" height="20" rx="3" fill="none" stroke="var(--vis)"></rect>
+        <rect x="468" y="262" width="50" height="20" rx="3" fill="none" stroke="var(--vis)"></rect>
+        <rect x="518" y="262" width="50" height="20" rx="3" fill="none" stroke="var(--vis)"></rect>
+
+        <line x1="10" y1="300" x2="670" y2="300" stroke="var(--line)"></line>
+
+        <text x="10" y="322" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="10.5">③ 인코더 24층 — 모양은 그대로, 내용은 전역</text>
+
+        <rect x="10" y="338" width="106" height="40" rx="6" fill="var(--panel2)" stroke="var(--vis)"></rect>
+        <text x="63" y="362" text-anchor="middle" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="11">(576, 1024)</text>
+        <text x="63" y="394" text-anchor="middle" fill="var(--tx3)" font-size="9">patch embedding 출력</text>
+
+        <line x1="120" y1="358" x2="140" y2="358" stroke="var(--tx3)" marker-end="url(#ah1)"></line>
+
+        <rect x="144" y="330" width="186" height="56" rx="6" fill="var(--panel)" stroke="var(--line)"></rect>
+        <text x="237" y="350" text-anchor="middle" fill="var(--tx2)" font-size="10">트랜스포머 블록 × 24</text>
+        <text x="237" y="368" text-anchor="middle" fill="var(--lang)" font-size="9.5">self-attention — 576개가 서로를 참조</text>
+
+        <line x1="334" y1="358" x2="354" y2="358" stroke="var(--tx3)" marker-end="url(#ah1)"></line>
+
+        <rect x="358" y="338" width="106" height="40" rx="6" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <text x="411" y="362" text-anchor="middle" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="11">(576, 1024)</text>
+        <text x="411" y="394" text-anchor="middle" fill="var(--tx3)" font-size="9">인코더 출력 — 모양이 같습니다</text>
+
+        <text x="480" y="346" fill="var(--tx2)" font-size="9.5">토큰 수도 차원도 그대로입니다.</text>
+        <text x="480" y="362" fill="var(--tx2)" font-size="9.5">달라지는 것은 각 벡터의 내용 —</text>
+        <text x="480" y="378" fill="var(--vis)" font-size="9.5">첫 층부터 전역 맥락이 섞입니다.</text>
+      </g>
+    </svg>
+    <p class="cap">조각 하나의 여정입니다. 원재료는 588개 픽셀이지만, 도착한 벡터는 <b>숫자 1024개</b>이고 그 안에는 자기 조각뿐 아니라 <b>이미지 전체의 맥락</b>이 들어 있습니다. 576은 계산으로 나오는 수, 1024는 사람이 고른 수입니다.</p>
+  </div>
+
+  <p>이 절을 한 줄로 줄이면 — <strong>이미지 토큰 하나는 "그림 조각"이 아니라 "그 자리에서 이미지 전체를 본 벡터"</strong>입니다. 그럼 그 벡터가 몇 개나 되느냐가 왜 그렇게 무서운지로 돌아가겠습니다.</p>
+
+  <h2>3. 왜 "제곱"이 무서운가</h2>
   <p>해상도를 224에서 448로 <em>2배</em> 올리면 토큰은 196개에서 784개로 <em>4배</em>가 되고, 어텐션 비용은 대략 <em>16배</em>가 됩니다. 그래서 모든 VLM 설계는 결국 하나의 질문으로 수렴합니다 — <strong>"토큰 예산을 어디에 쓸 것인가."</strong> 작은 글자를 읽어야 하는 문서 이해는 해상도가 곧 성능이지만, "고양이가 있나요" 수준의 질문에 784토큰은 낭비입니다.</p>
   <p>최신 모델들이 자랑하는 기법들 — 동적 해상도, 타일 분할, 토큰 압축 — 은 전부 이 예산 문제에 대한 서로 다른 답입니다. 3장에서 이 트레이드오프 곡선을 직접 그려봅니다.</p>
 
-  <h2>3. 확인 문제</h2>
+  <h2>4. 확인 문제</h2>
   <div class="lab">
     <div class="lab-tag">QUIZ 1-1</div>
     <p class="q">672×672 이미지를 14픽셀 패치로 자르면 이미지 토큰은 몇 개일까요?</p>
@@ -78,6 +255,7 @@
     <ol>
       <li>Dosovitskiy et al., <a href="https://arxiv.org/abs/2010.11929">An Image is Worth 16×16 Words (ViT)</a>, ICLR 2021 — 패치 분할이라는 발상 자체의 출처.</li>
       <li>Vaswani et al., <a href="https://arxiv.org/abs/1706.03762">Attention Is All You Need</a>, NeurIPS 2017 — 어텐션이 시퀀스 길이의 제곱인 이유.</li>
+      <li>2-4절 체급 표의 출처 — ViT 논문 Table 1이 Base(768 · 12층) · Large(1024 · 24층) · Huge(1280 · 32층)를 적어두었고, SO400M 체급(1152 · 27층)은 Alabdulmohsin et al., <a href="https://arxiv.org/abs/2305.13035">Getting ViT in Shape</a>, NeurIPS 2023의 SoViT-400m/14입니다. 그 모양을 그대로 쓰는 인코더가 Zhai et al., <a href="https://arxiv.org/abs/2303.15343">SigLIP</a>, ICCV 2023입니다.</li>
     </ol>
   </div>
 

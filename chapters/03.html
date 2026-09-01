@@ -68,6 +68,7 @@
   </div>
 
   <p>뒤에 나온 336px 변종이 이 표의 아랫줄입니다 — 패치 격자 24×24, <span class="tok v">576 토큰</span>. LLaVA-1.5가 쓴 것이 이 336px 판입니다.</p>
+  <p>표가 세는 것은 토큰의 <strong>개수</strong>입니다. 토큰 하나의 <strong>크기</strong>는 이 표에 나오지 않습니다 — ViT-L/14라면 숫자 1,024개짜리 벡터 하나이고, 담당하는 영역은 14×14 픽셀입니다(<a href="01.html">1장 2절</a>). 그러니 336px 한 장은 정확히 말해 <em>1,024개짜리 벡터 576개</em>가 됩니다. 이 장에서 "토큰 몇 개"라고 셀 때마다 그 하나가 이만한 부피라는 점을 기억해 두십시오.</p>
   <p>224가 무엇을 뜻하는지는 숫자로 보면 분명해집니다. A4 문서 한 장을 224×224로 줄이면 본문 글자 한 자의 높이가 <strong>두세 픽셀</strong>이 됩니다. 사람도 못 읽습니다. 모델이 못 읽는 것이 이상한 일이 아니라, <em>읽을 수 있는 픽셀이 애초에 남아 있지 않은</em> 것입니다.</p>
   <p>두 번째 문제는 종횡비입니다. 고정 정사각 입력은 16:9 파노라마도, 세로로 긴 영수증도 정사각으로 눌러 넣습니다. 글자가 찌그러지고, 가로로 긴 장면에서는 좌우 끝이 잘려 나갑니다.</p>
   <p>위치 임베딩을 보간(interpolate)해서 패치 격자를 448이나 672 입력에 맞게 늘리는 손은 오래전부터 있었습니다. 다만 그렇게 늘린 패치 격자는 <strong>사전학습이 본 적 없는 배치</strong>이므로, 늘린 만큼 다시 학습해 주지 않으면 이득이 생각만큼 나오지 않습니다. 그래서 판은 다른 방향으로 갔습니다 — 인코더를 늘리는 대신, <strong>이미지를 잘라서 여러 번 넣는</strong> 쪽입니다.</p>
@@ -120,6 +121,7 @@
         <rect x="384" y="46" width="42" height="42" rx="4" fill="var(--panel2)" stroke="var(--lang)" stroke-dasharray="4 3"></rect>
         <text x="405" y="71" text-anchor="middle" fill="var(--lang)" font-size="9.5">축소본</text>
         <text x="405" y="128" text-anchor="middle" fill="var(--tx2)" font-size="9.5">전역 축소본 1장</text>
+        <text x="402" y="142" text-anchor="middle" fill="var(--lang)" font-size="8">인코더를 따로 통과</text>
 
         <line x1="446" y1="20" x2="446" y2="152" stroke="var(--line)"></line>
 
@@ -156,7 +158,7 @@
         <text x="536" y="262" text-anchor="middle" fill="var(--tx2)" font-size="14">+</text>
         <rect x="550" y="236" width="42" height="42" rx="4" fill="var(--panel2)" stroke="var(--lang)" stroke-dasharray="4 3"></rect>
         <text x="571" y="261" text-anchor="middle" fill="var(--lang)" font-family="'IBM Plex Mono', monospace" font-size="10">576</text>
-        <text x="516" y="320" text-anchor="middle" fill="var(--tx3)" font-size="9.5">타일마다 독립으로 576 · 축소본도 576</text>
+        <text x="516" y="320" text-anchor="middle" fill="var(--tx3)" font-size="9.5">타일도 축소본도 각자 인코더를 통과 · 각 576</text>
 
         <line x1="10" y1="356" x2="670" y2="356" stroke="var(--line)"></line>
 
@@ -166,13 +168,45 @@
         <text x="10" y="428" fill="var(--tx3)" font-size="9.5">= (a×b + 1) × T 에서 a=2, b=2, T=576인 경우입니다</text>
       </g>
     </svg>
-    <p class="cap">두 층은 서로 곱해지지 않습니다. <b>바깥의 타일 배치</b>가 종횡비와 유효 해상도를 정하고, <b>안쪽의 패치 격자</b>는 타일 한 장 안에서 언제나 24×24입니다.</p>
+    <p class="cap">두 층은 서로 곱해지지 않습니다. <b>바깥의 타일 배치</b>가 종횡비와 유효 해상도를 정하고, <b>안쪽의 패치 격자</b>는 타일 한 장 안에서 언제나 24×24입니다. 축소본은 타일을 압축한 것이 아니라 인코더를 <b>따로 한 번 더</b> 통과하는 다섯 번째 입력입니다.</p>
   </div>
 
   <p>여기서 <strong>"격자"라는 한 단어가 두 층에 걸쳐 있다</strong>는 점을 분명히 해둡시다. 안쪽 패치 격자는 타일이 336×336 정사각이라 <strong>언제나 24×24로 고정</strong>이고, 타일이 늘어도 각 타일 안에서는 아무것도 달라지지 않습니다. 늘어나는 것은 <em>타일 수</em>뿐입니다. 그러니 <strong>종횡비를 담당하는 것은 안쪽이 아니라 바깥의 타일 배치</strong>입니다 — 가로로 긴 이미지에 1×4를 고르면 유효 해상도가 336×1344가 되어, 원본의 4:1이 눌리지 않고 그대로 들어갑니다. 같은 이미지를 336 한 장에 밀어 넣었다면 4:1이 1:1로 찌그러지거나, 레터박스 여백에 픽셀 예산의 4분의 3을 버렸을 것입니다.</p>
 
   <h3>3-2. 왜 축소본을 꼭 같이 넣을까요</h3>
   <p>타일만 넣으면 각 타일은 <em>자기 안쪽만</em> 봅니다. 어느 타일도 "이것이 영수증 한 장"이라는 사실을 모릅니다. 전역 축소본은 <strong>배치와 맥락</strong>을 담당합니다 — 세부는 타일이, 전체 구조는 축소본이. 검출에서 FPN이 저해상도 층으로 맥락을, 고해상도 층으로 작은 물체를 맡기는 분업과 발상이 같습니다.</p>
+
+  <p><strong>축소본은 타일 토큰을 압축해서 만든 것이 아닙니다.</strong> 여기서 자주 막힙니다 — 타일 4장이 낸 2,304 토큰을 눌러 576을 만든다고 읽으면 회계가 맞지 않습니다. 실제로는 <strong>원본 전체를 336×336 한 장으로 줄여 인코더에 한 번 더 통과시키는 별도의 입력</strong>입니다. 타일 4장에 이어지는 <strong>다섯 번째 forward</strong>이고, 그래서 타일과 똑같이 576 토큰을 씁니다. 토큰을 실제로 압축하는 것은 4절의 pixel-shuffle이 하는 일이고, 축소본은 압축이 아니라 <em>추가</em>입니다.</p>
+
+  <p>그런데 "원본 전체를 336×336으로 줄인다"는 말에서 한 번 더 걸립니다. <strong>4:1로 긴 이미지를 어떻게 정사각형으로 만든다는 것일까요?</strong> 답이 재미있습니다 — <strong>타일 경로와 축소본 경로가 서로 다른 방법을 씁니다.</strong></p>
+  <ul>
+    <li><strong>타일 쪽은 비율을 지킵니다.</strong> 종횡비를 유지한 채 타일 배치 크기에 맞춰 리사이즈하고, 모자라는 만큼 대칭으로 패딩을 넣은 뒤 336 단위로 자릅니다.</li>
+    <li><strong>축소본 쪽은 그냥 찌그러뜨립니다.</strong> 높이와 너비를 336으로 <em>명시해서</em> 리사이즈하므로 비율이 지켜지지 않습니다. 4:1 이미지라면 가로만 ¼로 눌리고 세로는 그대로입니다 — 원이 타원이 되어 들어갑니다.</li>
+  </ul>
+  <p>모델이 이 찌그러진 그림을 견디는 이유는 단순합니다. <strong>학습 때도 똑같이 찌그러진 축소본을 계속 봤기 때문</strong>입니다. 축소본에 기대하는 것은 정확한 모양이 아니라 <em>무엇이 어디쯤 있는가</em>이고, 그 정보는 눌려도 살아남습니다.</p>
+
+  <p>이 차이는 곧 <strong>토큰 하나가 원본의 얼마를 담당하느냐</strong>로 이어집니다. 타일 배치 1×4를 예로 들어 봅시다. 유효 해상도는 336×1344이고, 타일 4장에 축소본 한 장이 붙습니다.</p>
+  <ul>
+    <li><strong>타일 토큰</strong>은 유효 해상도 위의 <span class="tok v">14×14 픽셀</span>을 담당합니다. 패치가 14px이니 그대로입니다.</li>
+    <li><strong>축소본 토큰</strong>은 가로만 4배로 눌린 그림 위의 14×14를 담당합니다. 유효 해상도로 되돌리면 <span class="tok l">56×14 픽셀</span> — 가로로 네 칸을 한꺼번에 맡은 셈입니다.</li>
+  </ul>
+
+  <div class="tablebox">
+  <table>
+    <thead><tr><th>타일 배치 1×4 기준</th><th>타일 토큰</th><th>축소본 토큰</th></tr></thead>
+    <tbody>
+      <tr><td>어느 입력에서 나오나</td><td>타일 4장</td><td>축소본 1장 — <b>다섯 번째 입력</b></td></tr>
+      <tr><td>정사각형 맞추는 법</td><td>비율 유지 + 패딩</td><td>그대로 찌그러뜨리기</td></tr>
+      <tr><td>토큰 수</td><td class="num">4 × 576 = 2,304</td><td class="num">576</td></tr>
+      <tr><td>토큰 하나의 담당 영역</td><td class="num">14 × 14 px</td><td class="num">56 × 14 px</td></tr>
+      <tr><td>담당 면적</td><td class="num">1배</td><td class="num"><b>4배</b></td></tr>
+      <tr><td>실제로 보이는 것</td><td>작은 글자와 세부</td><td>배치와 맥락 — 글자는 못 읽습니다</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>일반화하면 간단합니다. 축소본은 타일이 깔린 면적 전체를 336×336 한 장에 밀어 넣습니다. 그러니 가로로 놓인 타일 수만큼 가로가 눌리고, 세로로 놓인 타일 수만큼 세로가 눌립니다. 결국 <strong>축소본 토큰 하나의 담당 면적은 언제나 타일 토큰의 "타일 수"배</strong>입니다 — 1×4 배치면 4배(56×14), 2×2 배치면 역시 4배(28×28)입니다.</p>
+  <p>그래서 두 층의 분업이 숫자로도 드러납니다. <strong>같은 576개인데 담당 면적이 4배 차이 납니다.</strong> 축소본으로는 본문 글자를 읽을 수 없고, 타일만으로는 "이것이 영수증 한 장"이라는 사실을 알 수 없습니다. 둘 다 넣는 이유가 여기 있습니다.</p>
 
   <h3>3-3. InternVL의 dynamic high-resolution</h3>
   <p>InternVL 1.5는 같은 아이디어를 더 크게 밀었습니다. 448px 타일을 쓰고, 종횡비에 맞춰 <strong>타일 수 자체를 이미지마다 다르게</strong> 정합니다 — 학습 때 1~12장, 테스트에서는 최대 40장(대략 4K)까지 늘어납니다. 여기에 448px로 줄인 축소본을 더합니다.</p>
@@ -460,7 +494,7 @@
     <h2>더 읽을거리</h2>
     <ol>
       <li>Liu et al., <a href="https://arxiv.org/abs/2310.03744">Improved Baselines with Visual Instruction Tuning (LLaVA-1.5)</a>, 2023 — CLIP ViT-L/14-336px 고정 입력. 논문은 해상도만 적고 토큰 수는 적지 않습니다. 576 = (336/14)²이 표로 인쇄된 곳은 <a href="https://arxiv.org/abs/2406.16860">Cambrian-1</a> Table 10과 <a href="https://llava-vl.github.io/blog/2024-05-25-llava-next-ablations/">LLaVA-NeXT 어블레이션 블로그</a>입니다.</li>
-      <li>Liu et al., <a href="https://llava-vl.github.io/blog/2024-01-30-llava-next/">LLaVA-NeXT</a>, 2024 — AnyRes 타일 배치 후보와 "픽셀 4배". 토큰 회계식 <code>L=(a×b+1)×T</code>는 <a href="https://arxiv.org/abs/2408.03326">LLaVA-OneVision</a>에, 최대 2,880이라는 수는 MM1·Cambrian-1·Idefics2에 인쇄되어 있습니다.</li>
+      <li>Liu et al., <a href="https://llava-vl.github.io/blog/2024-01-30-llava-next/">LLaVA-NeXT</a>, 2024 — AnyRes 타일 배치 후보와 "픽셀 4배". 토큰 회계식 <code>L=(a×b+1)×T</code>는 <a href="https://arxiv.org/abs/2408.03326">LLaVA-OneVision</a>에, 최대 2,880이라는 수는 MM1·Cambrian-1·Idefics2에 인쇄되어 있습니다. 3-2절의 "타일은 비율 유지 + 패딩, 축소본은 찌그러뜨리기"는 논문이 아니라 구현에 적혀 있습니다 — Hugging Face <code>transformers</code>의 <a href="https://github.com/huggingface/transformers/blob/main/src/transformers/models/llava_next/image_processing_llava_next.py">image_processing_llava_next.py</a>에서 타일은 <code>_resize_for_patching</code> + <code>_pad_for_patching</code>을 거치고, 축소본은 높이·너비를 336으로 명시한 <code>resize</code> 한 번을 거칩니다.</li>
       <li>Chen et al., <a href="https://arxiv.org/abs/2404.16821">How Far Are We to GPT-4V? (InternVL 1.5)</a>, 2024 — 448px 타일 동적 분할(학습 1~12, 테스트 40), 축소본, pixel-shuffle로 타일당 256 토큰, 시각 토큰 256~3,328.</li>
       <li>Wang et al., <a href="https://arxiv.org/abs/2409.12191">Qwen2-VL</a>, 2024 — naive dynamic resolution, 2D-RoPE, 2×2 병합, 그리고 이 장 6-1의 토큰 예산 표(Table 7). 그 앞의 계보로 Dehghani et al., <a href="https://arxiv.org/abs/2307.06304">NaViT: Patch n' Pack</a>, NeurIPS 2023.</li>
       <li>압축의 계보 — Jaegle et al., <a href="https://arxiv.org/abs/2103.03206">Perceiver</a>, ICML 2021 · Alayrac et al., <a href="https://arxiv.org/abs/2204.14198">Flamingo</a>, NeurIPS 2022(64개 고정) · Laurençon et al., <a href="https://arxiv.org/abs/2405.02246">Idefics2</a>, NeurIPS 2024(729→64 학습된 풀링, "64를 넘겨도 이득 없음") · <a href="https://arxiv.org/abs/2408.12637">Idefics3</a>, 2024(리샘플러를 버리고 pixel-shuffle로, 364² → 169 토큰).</li>

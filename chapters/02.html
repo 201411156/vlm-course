@@ -10,6 +10,13 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
 <link rel="stylesheet" href="../assets/css/base.css">
+<style>
+  /* 2장 전용 — 공용 자산은 건드리지 않습니다 */
+  .fig{margin:26px 0;background:var(--panel);border:1px solid var(--line);
+    border-radius:10px;padding:16px;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;min-width:600px;max-width:100%;height:auto}
+  .fig .cap{color:var(--tx3);font-size:12.5px;margin:12px auto 0;text-align:center;max-width:62ch}
+</style>
 </head>
 <body data-chapter="02">
 <a class="skip" href="#main">본문으로 건너뛰기</a>
@@ -23,8 +30,124 @@
 
   <h2>1. 좌표계가 두 개다</h2>
   <p>비전 인코더는 패치 하나를 <span class="tok v">d<sub>v</sub></span>차원 벡터로 만듭니다. 언어 모델은 단어 조각 하나를 <span class="tok l">d<sub>ℓ</sub></span>차원 임베딩으로 받습니다. CLIP ViT-L/14의 출력은 1024차원, 7B급 LLM의 입력 임베딩은 4096차원 — <strong>우선 차원부터 맞지 않습니다.</strong></p>
+  <p>그 1024는 계산해서 나온 값이 아니라 <strong>인코더 체급으로 정해진 설계값</strong>입니다 — patch embedding의 커널 개수가 곧 출력 채널이고 그것이 d<sub>v</sub>라는 이야기를 <a href="01.html">1장 2절</a>에서 했습니다. 토큰 <em>개수</em>는 해상도가 정하고 토큰 <em>차원</em>은 체급이 정합니다. 이 장에서 다루는 것은 뒤쪽, 차원 이야기입니다.</p>
   <p>그런데 차원을 억지로 맞춰도 문제는 남습니다. 언어 모델 임베딩 공간에서 "고양이"가 놓인 자리는 <em>텍스트만 보고</em> 정해진 좌표입니다. 비전 인코더가 고양이 패치에 부여한 벡터는 <em>이미지만 보고</em> 정해진 좌표입니다. 두 공간은 서로 아무런 약속을 한 적이 없습니다. 플러그 모양을 깎아 끼워 넣는다고 전압까지 맞는 것은 아닙니다.</p>
   <p><strong>정렬(alignment)</strong>이란 같은 개념이 두 공간에서 서로를 가리키게 만드는 일입니다. 이 장의 나머지는 전부 "그것을 어떻게 하느냐"에 대한 답들입니다.</p>
+
+
+  <div class="fig">
+    <svg viewBox="0 0 680 300" role="img" aria-label="이미지가 비전 인코더와 어댑터를 지나 언어 모델의 시퀀스에 들어가는 전체 경로와, 어댑터 3종이 토큰 개수를 어떻게 바꾸는지 보여주는 도해">
+      <defs>
+        <marker id="ah2a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,1 L9,5 L0,9 z" fill="var(--tx3)"></path>
+        </marker>
+      </defs>
+      <g font-family="'IBM Plex Sans KR', system-ui, sans-serif" font-size="10.5">
+
+        <text x="10" y="20" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="10.5">① 이미지가 언어 모델 안으로 들어가는 길</text>
+
+        <rect x="10" y="38" width="56" height="40" rx="6" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="38" y="62" text-anchor="middle" fill="var(--tx2)">이미지</text>
+
+        <line x1="70" y1="58" x2="86" y2="58" stroke="var(--tx3)" marker-end="url(#ah2a)"></line>
+
+        <rect x="90" y="38" width="84" height="40" rx="6" fill="var(--panel2)" stroke="var(--vis)"></rect>
+        <text x="132" y="62" text-anchor="middle" fill="var(--vis)">비전 인코더</text>
+
+        <line x1="178" y1="58" x2="194" y2="58" stroke="var(--tx3)" marker-end="url(#ah2a)"></line>
+
+        <rect x="198" y="38" width="96" height="40" rx="6" fill="var(--panel)" stroke="var(--line)"></rect>
+        <text x="246" y="62" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">(N, d_v)</text>
+        <text x="246" y="92" text-anchor="middle" fill="var(--tx3)" font-size="9">시각 토큰 N개</text>
+
+        <line x1="298" y1="58" x2="314" y2="58" stroke="var(--tx3)" marker-end="url(#ah2a)"></line>
+
+        <rect x="318" y="34" width="96" height="48" rx="6" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <text x="366" y="55" text-anchor="middle" fill="var(--lang)">다리</text>
+        <text x="366" y="70" text-anchor="middle" fill="var(--lang)" font-size="9.5">어댑터 · 프로젝터</text>
+        <text x="366" y="92" text-anchor="middle" fill="var(--tx3)" font-size="9">개수와 차원을 바꿉니다</text>
+
+        <line x1="418" y1="58" x2="434" y2="58" stroke="var(--tx3)" marker-end="url(#ah2a)"></line>
+
+        <rect x="438" y="38" width="96" height="40" rx="6" fill="var(--panel)" stroke="var(--line)"></rect>
+        <text x="486" y="62" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">(M, d_ℓ)</text>
+        <text x="486" y="92" text-anchor="middle" fill="var(--tx3)" font-size="9">언어 모델의 좌표계</text>
+
+        <line x1="538" y1="58" x2="554" y2="58" stroke="var(--tx3)" marker-end="url(#ah2a)"></line>
+
+        <rect x="558" y="38" width="84" height="40" rx="6" fill="var(--panel2)" stroke="var(--lang)"></rect>
+        <text x="600" y="62" text-anchor="middle" fill="var(--lang)">언어 모델</text>
+
+        <text x="10" y="122" fill="var(--tx3)" font-size="9.5">언어 모델이 실제로 받는 시퀀스 — 텍스트 토큰과 한 줄로 이어붙습니다</text>
+        <rect x="10" y="132" width="12" height="12" rx="2" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <rect x="26" y="132" width="12" height="12" rx="2" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <rect x="42" y="132" width="12" height="12" rx="2" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <rect x="62" y="132" width="12" height="12" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="78" y="132" width="12" height="12" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="94" y="132" width="12" height="12" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="110" y="132" width="12" height="12" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="126" y="132" width="12" height="12" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="142" y="132" width="12" height="12" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="162" y="132" width="12" height="12" rx="2" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <rect x="178" y="132" width="12" height="12" rx="2" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <text x="200" y="142" fill="var(--tx3)" font-size="9">텍스트 토큰과 시각 토큰이 같은 시퀀스에서 같은 방식으로 처리됩니다</text>
+
+        <line x1="10" y1="162" x2="670" y2="162" stroke="var(--line)"></line>
+
+        <text x="10" y="184" fill="var(--lang)" font-family="'IBM Plex Mono', monospace" font-size="10.5">② 다리 3종 — 개수가 어떻게 바뀌는가</text>
+
+        <text x="10" y="204" fill="var(--tx2)" font-size="10">linear · MLP</text>
+        <rect x="120" y="195" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="134" y="195" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="148" y="195" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="162" y="195" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="176" y="195" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="190" y="195" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="204" y="195" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="218" y="195" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <line x1="236" y1="200" x2="252" y2="200" stroke="var(--tx3)" marker-end="url(#ah2a)"></line>
+        <rect x="260" y="195" width="10" height="10" rx="2" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <rect x="274" y="195" width="10" height="10" rx="2" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <rect x="288" y="195" width="10" height="10" rx="2" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <rect x="302" y="195" width="10" height="10" rx="2" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <rect x="316" y="195" width="10" height="10" rx="2" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <rect x="330" y="195" width="10" height="10" rx="2" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <rect x="344" y="195" width="10" height="10" rx="2" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <rect x="358" y="195" width="10" height="10" rx="2" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <text x="390" y="204" fill="var(--tx2)" font-size="9.5">M = N · 공간 순서 보존</text>
+
+        <text x="10" y="238" fill="var(--tx2)" font-size="10">pixel-shuffle</text>
+        <rect x="120" y="229" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="134" y="229" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="148" y="229" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="162" y="229" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="176" y="229" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="190" y="229" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="204" y="229" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="218" y="229" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <line x1="236" y1="234" x2="252" y2="234" stroke="var(--tx3)" marker-end="url(#ah2a)"></line>
+        <rect x="260" y="229" width="10" height="10" rx="2" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <rect x="274" y="229" width="10" height="10" rx="2" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <text x="390" y="238" fill="var(--tx2)" font-size="9.5">M = N ÷ 4 · 순서 보존 · 파라미터 0</text>
+
+        <text x="10" y="272" fill="var(--tx2)" font-size="10">resampler</text>
+        <rect x="120" y="263" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="134" y="263" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="148" y="263" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="162" y="263" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="176" y="263" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="190" y="263" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="204" y="263" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="218" y="263" width="10" height="10" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <line x1="236" y1="268" x2="252" y2="268" stroke="var(--tx3)" marker-end="url(#ah2a)"></line>
+        <rect x="260" y="263" width="10" height="10" rx="2" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <rect x="274" y="263" width="10" height="10" rx="2" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <rect x="288" y="263" width="10" height="10" rx="2" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <text x="390" y="272" fill="var(--tx2)" font-size="9.5">M 고정 · N과 무관 · 순서 흐려짐</text>
+      </g>
+    </svg>
+    <p class="cap">리샘플러도 pixel-shuffle도 <b>같은 자리</b>에 놓입니다 — 인코더가 낸 시각 토큰을 받아 언어 모델의 임베딩 공간으로 넘기는 다리입니다. 다른 것은 넘길 때 <b>개수를 어떻게 하느냐</b>뿐입니다.</p>
+  </div>
 
   <h2>2. CLIP — 정렬을 손실함수로 만들다</h2>
   <p>2021년 CLIP은 정렬을 <strong>학습 목표 그 자체</strong>로 삼았습니다. 웹에서 모은 이미지-텍스트 쌍 4억 개를 놓고, 배치 N개마다 <span class="tok v">이미지 임베딩</span> N개와 <span class="tok l">텍스트 임베딩</span> N개로 N×N 유사도 행렬을 만듭니다. 그리고 <strong>대각선(진짜 짝)만 올리고 나머지 N²−N칸은 내립니다.</strong> 이것이 전부입니다.</p>
@@ -117,6 +240,91 @@
     <li><strong>Flamingo</strong>의 Perceiver Resampler: latent 쿼리 64개. 입력이 몇 프레임이든 출력은 64개입니다.</li>
     <li><strong>BLIP-2</strong>의 Q-Former: 학습 쿼리 32개에 별도의 사전학습 단계까지 붙였습니다.</li>
   </ul>
+  <p>여기서 자연스러운 의문이 하나 생깁니다. <strong>들어오는 토큰 수 N은 해상도에 따라 계속 바뀌는데, 어떻게 출력이 항상 M개일 수 있을까요?</strong> N×M 행렬 같은 것을 미리 들고 있는 것일까요 — 그렇다면 N이 바뀌는 순간 그 행렬은 못 쓰게 될 텐데 말입니다.</p>
+  <p>답은 <strong>학습 파라미터 목록에 N이 아예 없다</strong>는 것입니다. 리샘플러가 저장하고 있는 것은 학습 쿼리 (M, D)와 W<sub>Q</sub>·W<sub>K</sub>·W<sub>V</sub>·W<sub>O</sub> 네 장의 (D, D) 행렬뿐입니다. 어디에도 N이 끼어들 자리가 없으니, N이 576이든 2,880이든 <em>같은 파라미터가 그대로 돕니다</em>.</p>
+  <p>N이 등장하는 곳은 <strong>계산 중간</strong>입니다. 어텐션 행렬 <code>A = softmax(QKᵀ / √D)</code>의 모양이 (M, N)인데, 이것은 저장된 가중치가 아니라 <strong>입력이 들어올 때마다 새로 만들어지는 값</strong>입니다. 그리고 바로 다음 곱셈에서 사라집니다 — <code>(M, N) @ (N, D) = (M, D)</code>. N은 두 행렬이 맞닿는 <strong>안쪽 축</strong>이라 곱하고 나면 남지 않습니다.</p>
+
+
+  <div class="fig">
+    <svg viewBox="0 0 680 348" role="img" aria-label="리샘플러의 학습 파라미터에는 입력 토큰 수 N이 없고, 어텐션 계산 도중 N이 안쪽 축으로 소거되어 항상 M개가 나오는 과정을 모양으로 추적한 도해">
+      <defs>
+        <marker id="ah2b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,1 L9,5 L0,9 z" fill="var(--tx3)"></path>
+        </marker>
+      </defs>
+      <g font-family="'IBM Plex Sans KR', system-ui, sans-serif" font-size="10.5">
+
+        <text x="10" y="20" fill="var(--lang)" font-family="'IBM Plex Mono', monospace" font-size="10.5">① 저장되는 것 — 학습 파라미터</text>
+
+        <rect x="10" y="34" width="116" height="44" rx="6" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <text x="68" y="52" text-anchor="middle" fill="var(--lang)" font-size="10">학습 쿼리</text>
+        <text x="68" y="69" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">(M, D)</text>
+
+        <rect x="136" y="34" width="116" height="44" rx="6" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="194" y="52" text-anchor="middle" fill="var(--tx2)" font-size="10">W_Q</text>
+        <text x="194" y="69" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">(D, D)</text>
+
+        <rect x="262" y="34" width="116" height="44" rx="6" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="320" y="52" text-anchor="middle" fill="var(--tx2)" font-size="10">W_K</text>
+        <text x="320" y="69" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">(D, D)</text>
+
+        <rect x="388" y="34" width="116" height="44" rx="6" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="446" y="52" text-anchor="middle" fill="var(--tx2)" font-size="10">W_V</text>
+        <text x="446" y="69" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">(D, D)</text>
+
+        <rect x="514" y="34" width="116" height="44" rx="6" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="572" y="52" text-anchor="middle" fill="var(--tx2)" font-size="10">W_O</text>
+        <text x="572" y="69" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">(D, D)</text>
+
+        <text x="10" y="98" fill="var(--vis)" font-size="9.5">다섯 개 어디에도 N이 없습니다 — 그래서 N이 576이든 2,880이든 같은 파라미터가 그대로 돕니다.</text>
+
+        <line x1="10" y1="112" x2="670" y2="112" stroke="var(--line)"></line>
+
+        <text x="10" y="134" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="10.5">② 매번 계산되는 것 — 모양을 따라가 봅시다</text>
+
+        <rect x="10" y="150" width="100" height="34" rx="6" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <text x="60" y="171" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">Q (M, D)</text>
+
+        <rect x="10" y="196" width="100" height="34" rx="6" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <text x="60" y="217" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">K (N, D)</text>
+
+        <rect x="10" y="242" width="100" height="34" rx="6" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <text x="60" y="263" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">V (N, D)</text>
+
+        <text x="10" y="292" fill="var(--tx3)" font-size="9">Q는 학습 쿼리에서, K·V는 시각 토큰 N개에서 나옵니다</text>
+
+        <line x1="114" y1="167" x2="150" y2="176" stroke="var(--tx3)" marker-end="url(#ah2b)"></line>
+        <line x1="114" y1="213" x2="150" y2="190" stroke="var(--tx3)" marker-end="url(#ah2b)"></line>
+
+        <rect x="158" y="156" width="148" height="46" rx="6" fill="var(--panel)" stroke="var(--line)"></rect>
+        <text x="232" y="175" text-anchor="middle" fill="var(--tx2)" font-size="10">A = softmax(QKᵀ)</text>
+        <text x="232" y="192" text-anchor="middle" fill="var(--lang)" font-family="'IBM Plex Mono', monospace" font-size="12">(M, N)</text>
+        <text x="232" y="220" text-anchor="middle" fill="var(--lang)" font-size="9">저장된 가중치가 아니라</text>
+        <text x="232" y="234" text-anchor="middle" fill="var(--lang)" font-size="9">매번 계산되는 값입니다</text>
+
+        <line x1="310" y1="180" x2="342" y2="196" stroke="var(--tx3)" marker-end="url(#ah2b)"></line>
+        <path d="M114 259 H330 V215 H346" fill="none" stroke="var(--tx3)" marker-end="url(#ah2b)"></path>
+
+        <rect x="350" y="182" width="164" height="46" rx="6" fill="var(--panel)" stroke="var(--vis)"></rect>
+        <text x="432" y="201" text-anchor="middle" fill="var(--tx2)" font-size="10">A · V</text>
+        <text x="432" y="219" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">(M, N) @ (N, D)</text>
+        <text x="432" y="248" text-anchor="middle" fill="var(--vis)" font-size="9.5">N이 안쪽 축에서 만나 사라집니다</text>
+
+        <line x1="518" y1="205" x2="538" y2="205" stroke="var(--tx3)" marker-end="url(#ah2b)"></line>
+
+        <rect x="542" y="182" width="118" height="46" rx="6" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <text x="601" y="211" text-anchor="middle" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="13">(M, D)</text>
+        <text x="601" y="248" text-anchor="middle" fill="var(--tx3)" font-size="9">W_O를 지나도 (M, D)</text>
+
+        <line x1="10" y1="306" x2="670" y2="306" stroke="var(--line)"></line>
+        <text x="10" y="328" fill="var(--tx)" font-size="10.5">규칙 — 어텐션의 출력 개수는 언제나 <tspan fill="var(--vis)">쿼리의 개수</tspan>입니다. self-attention이면 입력 길이 N, cross-attention이면 학습 쿼리 M.</text>
+      </g>
+    </svg>
+    <p class="cap">N × M 행렬 같은 것은 어디에도 저장되지 않습니다. (M, N) 어텐션 행렬은 <b>매번 계산되는 값</b>이고, 그다음 곱셈에서 N이 안쪽 축으로 소거되어 출력은 언제나 (M, D)가 됩니다.</p>
+  </div>
+
+  <p>그래서 규칙은 한 줄로 외울 수 있습니다. <strong>어텐션의 출력 개수는 언제나 쿼리의 개수입니다.</strong> self-attention은 쿼리를 입력 자신에게서 만드니 출력이 입력 길이와 같고, 리샘플러의 cross-attention은 쿼리가 학습된 M개이니 출력이 언제나 M개입니다. 개수를 정하는 것은 입력이 아니라 쿼리 쪽입니다.</p>
+
   <p>LLM 쪽 비용이 입력 해상도와 무관하게 <strong>상수</strong>가 된다는 점은 큰 장점입니다. 대가도 분명합니다. <strong>압축은 손실입니다</strong> — 작은 글자나 멀리 있는 물체의 단서가 M개 안으로 들어가지 못합니다. 게다가 쿼리 출력에는 "몇 번째 패치였는지"가 흐려져 있어 <strong>좌표를 말하기가 어려워집니다</strong>. 학습 난이도도 올라갑니다. 그래서 최근 흐름은 다시 1:1 쪽으로 기울었고, 압축이 필요할 때는 다음 방식을 씁니다.</p>
 
   <h3>5-4. 파라미터 없는 압축 — pixel-shuffle / patch merge</h3>
