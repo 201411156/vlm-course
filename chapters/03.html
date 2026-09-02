@@ -74,6 +74,16 @@
   <p>위치 임베딩을 보간(interpolate)해서 패치 격자를 448이나 672 입력에 맞게 늘리는 손은 오래전부터 있었습니다. 다만 그렇게 늘린 패치 격자는 <strong>사전학습이 본 적 없는 배치</strong>이므로, 늘린 만큼 다시 학습해 주지 않으면 이득이 생각만큼 나오지 않습니다. 그래서 판은 다른 방향으로 갔습니다 — 인코더를 늘리는 대신, <strong>이미지를 잘라서 여러 번 넣는</strong> 쪽입니다.</p>
 
   <h2>3. 잘라서 넣기 — 동적 해상도와 타일</h2>
+  <p>여기서 제약 하나를 못 박아 두어야 그다음이 풀립니다. <strong>인코더가 받는 것은 336×336 한 장뿐입니다.</strong> 바로 앞 절에서 본 그대로 — 위치 임베딩이 24×24 격자에 맞춘 <strong>576칸짜리 고정 테이블</strong>이라, 그보다 많은 패치가 들어오면 붙여 줄 위치 벡터가 없습니다.</p>
+  <p>그래서 큰 이미지를 넣는 <strong>순서</strong>가 뒤집힙니다. <em>먼저 336×336으로 만들고, 그다음 14로 나눕니다.</em> 반대로 하면 안 됩니다. 1344×336짜리 이미지를 그냥 14로 나누면 96 × 24 = <span class="tok l">2,304 패치</span>가 나오는데, 나눗셈이 안 되는 것이 아니라 <strong>인코더가 그 길이를 받지 못합니다</strong>. 격자는 잘 나뉘었는데 앉을 자리가 576개뿐인 것입니다.</p>
+  <p>그 2,304는 조금 뒤에 나올 "타일 4장 = 2,304 토큰"과 같은 수인데, 우연이 아닙니다. <strong>같은 픽셀을 센 것</strong>이니까요. 달라지는 것은 그 2,304를 인코더가 <em>한 번에</em> 받느냐, <span class="tok v">576씩 네 번에 나눠</span> 받느냐뿐입니다. 그리고 인코더가 할 수 있는 쪽은 뒤쪽입니다.</p>
+  <p>그러니 "먼저 336×336으로 만든다"에 답이 둘 있습니다. <strong>자르거나, 줄이거나.</strong></p>
+  <ul>
+    <li><strong>자르면 타일입니다.</strong> 1344×336을 336짜리 네 조각으로 자르면 조각마다 336×336 — 인코더가 그대로 받습니다. 픽셀은 하나도 버리지 않습니다.</li>
+    <li><strong>줄이면 축소본입니다.</strong> 1344×336 전체를 336×336 한 장으로 눌러 넣습니다. 한 번에 전체를 보지만 세부를 잃습니다.</li>
+  </ul>
+  <p>이 두 답이 곧 이 절의 내용이고, <strong>둘 다 쓰는 것</strong>이 3-1의 AnyRes입니다. 그리고 한 걸음 더 나가면 이런 질문이 남습니다 — <strong>애초에 그 576칸짜리 테이블을 없애면 되지 않나요?</strong> 됩니다. 그것이 5절에서 볼 네이티브 해상도이고, 위치 테이블을 2D-RoPE로 갈아 끼우는 순간 타일도 축소본도 통째로 필요 없어집니다. 이 절과 다음 절은 <em>그 테이블이 아직 거기 있을 때</em>의 이야기입니다.</p>
+
   <p>발상은 단순합니다. 224나 336짜리 인코더는 그대로 두고, 큰 이미지를 <strong>그 크기의 타일 여러 장으로 쪼개서</strong> 전부 통과시킨 뒤 토큰을 이어 붙입니다. 인코더를 새로 학습할 필요가 없고, 해상도는 타일 수만큼 올라갑니다.</p>
 
   <h3>3-1. AnyRes — 타일 배치 후보 중에서 고르기</h3>
@@ -215,6 +225,206 @@
   <div class="note">
     <b>타일 경계는 공짜가 아닙니다.</b> 글자나 물체가 타일 경계에 걸리면 두 타일로 쪼개져 각각 반쪽만 봅니다. 타일 배치 후보를 여러 개 두고 종횡비로 고르는 이유의 절반이 이것이고, 나머지 절반은 빈 여백에 타일을 낭비하지 않기 위해서입니다.
   </div>
+
+  <h3>3-4. "이어 붙인다"는 것 — 재조립 · 패딩 제거 · 줄바꿈</h3>
+  <p>이 절 첫머리에서 <em>"전부 통과시킨 뒤 토큰을 이어 붙입니다"</em>라고 한 줄로 넘어갔습니다. 그 한 줄이 실제로는 세 단계입니다. Hugging Face 구현에서 이 일을 맡는 함수가 <code>LlavaNextModel.pack_image_features</code>이고, 문서 설명이 세 단계를 그대로 적어 둡니다 — <em>"Reshape, unpad and then pack each image_feature into a single image_features tensor"</em>.</p>
+
+  <p><strong>① Reshape — 타일별이 아니라 공간 순서로.</strong> 먼저 타일 토큰들을 <strong>원본에 놓였던 배치대로 하나의 큰 격자로 되돌립니다.</strong> 타일 배치 2×2면 24×24짜리 격자 4장이 <span class="tok v">48×48</span> 격자 하나가 됩니다. 그리고 그 격자를 <strong>행 단위로</strong> 폅니다.</p>
+  <p>여기가 자주 어긋나는 자리입니다. <strong>타일을 하나씩 통째로 이어 붙이는 것이 아닙니다.</strong> 공간 순서로 펴기 때문에 <em>타일 1의 첫 행 24개 다음에 타일 2의 첫 행 24개가 한 줄로 이어집니다.</em> 왼쪽 위 타일을 다 쓰고 오른쪽 위 타일로 넘어가는 순서가 아니라, 원본 이미지를 왼쪽에서 오른쪽으로 한 줄씩 읽는 순서입니다.</p>
+
+  <p><strong>② Unpad — 패딩 자리 걷어내기.</strong> 3-2절에서 타일 경로는 <em>비율을 지킨 채 패딩을 넣는다</em>고 했습니다. 그 패딩 자리에서 나온 토큰은 아무것도 담고 있지 않으므로 여기서 걷어냅니다. 그래서 <strong>실제로 LLM에 들어가는 시각 토큰 수는 2,880보다 적을 수 있습니다</strong> — 2,880은 <em>상한</em>이지 언제나 그만큼 쓴다는 뜻이 아닙니다. 종횡비가 타일 배치와 딱 맞아 패딩이 없었다면 격자는 48×48 그대로 남습니다.</p>
+
+  <p><strong>③ 줄바꿈 토큰 — 행이 끝났다는 표시.</strong> 격자를 1차원으로 펴는 순간 <strong>행 경계가 사라집니다.</strong> 48×48을 그냥 이어 붙이면 첫 행의 마지막 토큰과 둘째 행의 첫 토큰이 바로 옆자리에 놓여, 모델이 보기에는 그 둘이 <em>가로로 이웃한 사이</em>와 구별되지 않습니다.</p>
+  <p>그래서 <strong>행이 끝날 때마다 학습된 줄바꿈 벡터를 하나씩 끼워 넣습니다.</strong> 구현의 인자 이름이 그대로 <code>image_newline</code>이고, 문서는 <em>"New line embedding vector"</em>라고만 적어 둡니다 — 모양은 <code>(embed_dim)</code>, 벡터 하나입니다. 텍스트에서 <code>\n</code>이 하는 일을 시각 토큰 줄에서 하는 것입니다. 48행이면 48개가 들어갑니다.</p>
+  <p>작은 예로 줄여 보면 한눈에 들어옵니다. 3×3 격자 하나를 편다고 해봅시다.</p>
+  <pre><code>a b c
+d e f
+g h i
+
+→  a b c d e f g h i          (그냥 펴면)
+→  a b c ⏎ d e f ⏎ g h i ⏎   (행 끝마다 줄바꿈)</code></pre>
+  <p>위쪽 줄에서 <code>c</code>와 <code>d</code>는 바로 붙어 있어 가로로 이웃한 사이처럼 보입니다. 실제로는 오른쪽 끝과 왼쪽 끝, 격자에서 가장 먼 두 자리입니다. 아래쪽 줄에서는 그 사이에 표시가 하나 서 있습니다.</p>
+
+  <p><strong>그러면 위치 인코딩으로는 왜 안 될까요.</strong> "LLM에도 위치 인코딩이 있는데 그것으로 몇 번째 줄인지 알 수 없나요?"라는 의문이 자연스럽습니다. 두 가지가 막습니다.</p>
+  <ul>
+    <li><strong>LLM의 위치 인코딩은 1차원 순서만 알려줍니다.</strong> "이 토큰이 시퀀스의 몇 번째"까지가 전부이고, 그것이 2차원 격자의 몇 행 몇 열인지는 담고 있지 않습니다.</li>
+    <li><strong>게다가 폭이 이미지마다 다릅니다.</strong> 타일 배치 2×2면 한 행이 48열, 1×4면 96열, 축소본이나 단일 입력이면 24열입니다. 1차원 번호를 행·열로 되돌리려면 폭을 알아야 하는데 그 폭이 매번 바뀌니, 규칙으로 유추할 수가 없습니다. <strong>명시적인 표시를 하나 두는 수밖에 없습니다.</strong></li>
+  </ul>
+
+  <p><strong>그래서 최종 시퀀스는</strong> 이렇게 생겼습니다.</p>
+  <p style="font-family:'IBM Plex Mono',monospace;font-size:13.5px;color:var(--tx2)">
+    [ 텍스트 T ] [ 축소본 576 ] [ 타일 격자를 행 단위로 편 것 + 행마다 ⏎ ]
+  </p>
+  <p>패딩이 없는 2×2 배치라면 타일 토큰 2,304개에 줄바꿈 48개가 붙어 2,352개, 여기에 축소본 576개를 더해 <span class="tok v">2,928</span>입니다. 앞에서 센 2,880에 줄바꿈 48개가 얹힌 수입니다.</p>
+  <p>마지막으로 <strong>차원과 길이를 갈라 두십시오.</strong> 이어 붙일 때 맞아야 하는 것은 <strong>마지막 축인 특징 차원뿐</strong>이고, 길이는 그냥 더해집니다.</p>
+  <p style="font-family:'IBM Plex Mono',monospace;font-size:13.5px;color:var(--tx2)">
+    (T, 4096) + (576, 4096) + (2352, 4096) → (T + 2928, 4096)
+  </p>
+  <p>트랜스포머는 언제나 <strong>1차원 시퀀스</strong>만 받습니다. "이것이 2차원 격자였다"는 사실은 어디에도 텐서 모양으로 남지 않고, <strong>순서와 줄바꿈 토큰</strong> 둘만으로 표현됩니다. 이미지가 격자였다는 정보를 그 둘이 통째로 짊어지고 있는 셈입니다.</p>
+
+  <div class="fig">
+    <svg viewBox="0 0 680 470" role="img" aria-label="타일 토큰을 하나의 큰 격자로 재조립해 행 단위로 펴고, 행 끝마다 줄바꿈 벡터를 끼워 넣어 언어 모델의 한 줄로 만드는 과정을 보여주는 도해">
+      <defs>
+        <marker id="ah3b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,1 L9,5 L0,9 z" fill="var(--tx3)"></path>
+        </marker>
+      </defs>
+      <g font-family="'IBM Plex Sans KR', system-ui, sans-serif" font-size="10.5">
+
+        <text x="10" y="18" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="10.5">&#9312; &#51116;&#51312;&#47549; &#8212; &#53440;&#51068;&#48324; &#49692;&#49436;&#44032; &#50500;&#45768;&#46972; &#44277;&#44036; &#49692;&#49436;&#47196;</text>
+
+        <rect x="14" y="36" width="46" height="46" rx="3" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="64" y="36" width="46" height="46" rx="3" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="14" y="86" width="46" height="46" rx="3" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="64" y="86" width="46" height="46" rx="3" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <text x="37" y="63" text-anchor="middle" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="9.5">24&#215;24</text>
+        <text x="87" y="63" text-anchor="middle" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="9.5">24&#215;24</text>
+        <text x="37" y="113" text-anchor="middle" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="9.5">24&#215;24</text>
+        <text x="87" y="113" text-anchor="middle" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="9.5">24&#215;24</text>
+        <text x="62" y="150" text-anchor="middle" fill="var(--tx2)" font-size="9.5">&#53440;&#51068; 4&#51109;</text>
+
+        <line x1="118" y1="84" x2="146" y2="84" stroke="var(--tx3)" marker-end="url(#ah3b)"></line>
+
+        <rect x="156" y="36" width="96" height="96" rx="3" fill="var(--panel2)" stroke="var(--vis)"></rect>
+        <line x1="204" y1="36" x2="204" y2="132" stroke="var(--vis)" stroke-dasharray="3 3" opacity="0.7"></line>
+        <line x1="156" y1="84" x2="252" y2="84" stroke="var(--vis)" stroke-dasharray="3 3" opacity="0.7"></line>
+        <text x="204" y="90" text-anchor="middle" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="12">48&#215;48</text>
+        <text x="204" y="150" text-anchor="middle" fill="var(--tx2)" font-size="9.5">&#44201;&#51088; &#54620; &#51109;&#51004;&#47196; &#51116;&#51312;&#47549;</text>
+
+        <line x1="258" y1="84" x2="286" y2="84" stroke="var(--tx3)" marker-end="url(#ah3b)"></line>
+
+        <text x="296" y="48" fill="var(--tx2)" font-size="9.5">&#54665; &#45800;&#50948;&#47196; &#54140;&#47732; &#52395; &#51460;&#51008; &#51060;&#47100;&#44172; &#51060;&#50612;&#51665;&#45768;&#45796;</text>
+        <rect x="296" y="62" width="9" height="13" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="307" y="62" width="9" height="13" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="318" y="62" width="9" height="13" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="329" y="62" width="9" height="13" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="340" y="62" width="9" height="13" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="351" y="62" width="9" height="13" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="362" y="62" width="9" height="13" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="373" y="62" width="9" height="13" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="384" y="62" width="9" height="13" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="395" y="62" width="9" height="13" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="406" y="62" width="9" height="13" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="417" y="62" width="9" height="13" rx="2" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <rect x="428" y="62" width="9" height="13" rx="2" fill="var(--panel2)" stroke="var(--vis)"></rect>
+        <rect x="439" y="62" width="9" height="13" rx="2" fill="var(--panel2)" stroke="var(--vis)"></rect>
+        <rect x="450" y="62" width="9" height="13" rx="2" fill="var(--panel2)" stroke="var(--vis)"></rect>
+        <rect x="461" y="62" width="9" height="13" rx="2" fill="var(--panel2)" stroke="var(--vis)"></rect>
+        <rect x="472" y="62" width="9" height="13" rx="2" fill="var(--panel2)" stroke="var(--vis)"></rect>
+        <rect x="483" y="62" width="9" height="13" rx="2" fill="var(--panel2)" stroke="var(--vis)"></rect>
+        <rect x="494" y="62" width="9" height="13" rx="2" fill="var(--panel2)" stroke="var(--vis)"></rect>
+        <rect x="505" y="62" width="9" height="13" rx="2" fill="var(--panel2)" stroke="var(--vis)"></rect>
+        <rect x="516" y="62" width="9" height="13" rx="2" fill="var(--panel2)" stroke="var(--vis)"></rect>
+        <rect x="527" y="62" width="9" height="13" rx="2" fill="var(--panel2)" stroke="var(--vis)"></rect>
+        <rect x="538" y="62" width="9" height="13" rx="2" fill="var(--panel2)" stroke="var(--vis)"></rect>
+        <rect x="549" y="62" width="9" height="13" rx="2" fill="var(--panel2)" stroke="var(--vis)"></rect>
+        <rect x="562" y="62" width="16" height="13" rx="2" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <text x="570" y="72" text-anchor="middle" fill="var(--lang)" font-size="9">&#9166;</text>
+        <line x1="296" y1="80" x2="424" y2="80" stroke="var(--vis)" opacity="0.6"></line>
+        <line x1="428" y1="80" x2="556" y2="80" stroke="var(--vis)" opacity="0.6"></line>
+        <text x="360" y="93" text-anchor="middle" fill="var(--tx3)" font-size="9">&#53440;&#51068; 1&#51032; &#52395; &#54665; 24&#44060;</text>
+        <text x="492" y="93" text-anchor="middle" fill="var(--tx3)" font-size="9">&#53440;&#51068; 2&#51032; &#52395; &#54665; 24&#44060;</text>
+        <text x="296" y="116" fill="var(--vis)" font-size="9.5">&#53440;&#51068;&#51012; &#53685;&#51704;&#47196; &#51060;&#50612; &#48520;&#51060;&#45716; &#44163;&#51060; &#50500;&#45784;&#45768;&#45796; &#8212; &#50896;&#48376;&#51012; &#50722;&#51901;&#50640;&#49436; &#50724;&#47480;&#51901;&#51004;&#47196; &#54620; &#51460; &#51069;&#45716; &#49692;&#49436;&#51077;&#45768;&#45796;.</text>
+        <text x="296" y="134" fill="var(--tx3)" font-size="9.5">&#54665;&#51060; 48&#44060;&#51060;&#47732; &#51460;&#48148;&#44823;&#46020; 48&#44060;&#44032; &#46308;&#50612;&#44161;&#45768;&#45796;.</text>
+
+        <line x1="10" y1="166" x2="670" y2="166" stroke="var(--line)"></line>
+
+        <text x="10" y="188" fill="var(--lang)" font-family="'IBM Plex Mono', monospace" font-size="10.5">&#9313; &#50637; &#51460;&#48148;&#44823;&#51060; &#54596;&#50836;&#54620;&#44032; &#8212; 3&#215;3&#47196; &#51456;&#50668; &#48372;&#47732;</text>
+        <rect x="14" y="202" width="24" height="24" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="26" y="218" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">a</text>
+        <rect x="40" y="202" width="24" height="24" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="52" y="218" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">b</text>
+        <rect x="66" y="202" width="24" height="24" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="78" y="218" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">c</text>
+        <rect x="14" y="228" width="24" height="24" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="26" y="244" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">d</text>
+        <rect x="40" y="228" width="24" height="24" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="52" y="244" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">e</text>
+        <rect x="66" y="228" width="24" height="24" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="78" y="244" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">f</text>
+        <rect x="14" y="254" width="24" height="24" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="26" y="270" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">g</text>
+        <rect x="40" y="254" width="24" height="24" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="52" y="270" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">h</text>
+        <rect x="66" y="254" width="24" height="24" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="78" y="270" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">i</text>
+        <text x="53" y="298" text-anchor="middle" fill="var(--tx3)" font-size="9">3&#215;3 &#44201;&#51088;</text>
+
+        <text x="116" y="220" fill="var(--tx2)" font-size="10">&#44536;&#45143; &#54140;&#47732;</text>
+        <rect x="200" y="208" width="22" height="18" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="211" y="221" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">a</text>
+        <rect x="224" y="208" width="22" height="18" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="235" y="221" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">b</text>
+        <rect x="248" y="208" width="22" height="18" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="259" y="221" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">c</text>
+        <rect x="272" y="208" width="22" height="18" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="283" y="221" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">d</text>
+        <rect x="296" y="208" width="22" height="18" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="307" y="221" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">e</text>
+        <rect x="320" y="208" width="22" height="18" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="331" y="221" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">f</text>
+        <rect x="344" y="208" width="22" height="18" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="355" y="221" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">g</text>
+        <rect x="368" y="208" width="22" height="18" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="379" y="221" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">h</text>
+        <rect x="392" y="208" width="22" height="18" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="403" y="221" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">i</text>
+        <path d="M264 197 L274 197 L269 204 z" fill="var(--bad)"></path>
+        <line x1="269" y1="203" x2="269" y2="230" stroke="var(--bad)" stroke-width="1.2" stroke-dasharray="3 2"></line>
+        <text x="424" y="221" fill="var(--bad)" font-size="9.5">c&#50752; d&#44032; &#44032;&#47196;&#47196; &#51060;&#50663;&#54620; &#49324;&#51060;&#52376;&#47100; &#48372;&#51077;&#45768;&#45796;</text>
+
+        <text x="116" y="262" fill="var(--tx2)" font-size="10">&#51460;&#48148;&#44823;&#51012;</text>
+        <text x="116" y="275" fill="var(--tx2)" font-size="10">&#45080;&#50864;&#47732;</text>
+        <rect x="200" y="256" width="22" height="18" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="211" y="269" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">a</text>
+        <rect x="224" y="256" width="22" height="18" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="235" y="269" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">b</text>
+        <rect x="248" y="256" width="22" height="18" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="259" y="269" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">c</text>
+        <rect x="272" y="256" width="22" height="18" rx="3" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <text x="283" y="269" text-anchor="middle" fill="var(--lang)" font-size="10">&#9166;</text>
+        <rect x="296" y="256" width="22" height="18" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="307" y="269" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">d</text>
+        <rect x="320" y="256" width="22" height="18" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="331" y="269" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">e</text>
+        <rect x="344" y="256" width="22" height="18" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="355" y="269" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">f</text>
+        <rect x="368" y="256" width="22" height="18" rx="3" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <text x="379" y="269" text-anchor="middle" fill="var(--lang)" font-size="10">&#9166;</text>
+        <rect x="392" y="256" width="22" height="18" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="403" y="269" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">g</text>
+        <rect x="416" y="256" width="22" height="18" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="427" y="269" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">h</text>
+        <rect x="440" y="256" width="22" height="18" rx="3" fill="var(--panel2)" stroke="var(--line)"></rect>
+        <text x="451" y="269" text-anchor="middle" fill="var(--tx)" font-family="'IBM Plex Mono', monospace" font-size="11">i</text>
+        <rect x="464" y="256" width="22" height="18" rx="3" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <text x="475" y="269" text-anchor="middle" fill="var(--lang)" font-size="10">&#9166;</text>
+        <text x="496" y="269" fill="var(--vis)" font-size="9.5">&#54665; &#45149;&#51060; &#54364;&#49884;&#47196; &#45224;&#49845;&#45768;&#45796;</text>
+
+        <line x1="10" y1="306" x2="670" y2="306" stroke="var(--line)"></line>
+
+        <text x="10" y="328" fill="var(--tx3)" font-family="'IBM Plex Mono', monospace" font-size="10.5">&#9314; &#50616;&#50612; &#47784;&#45944;&#51060; &#49892;&#51228;&#47196; &#48155;&#45716; &#54620; &#51460;</text>
+
+        <rect x="10" y="342" width="104" height="30" rx="5" fill="var(--lang-dim)" stroke="var(--lang)"></rect>
+        <text x="62" y="361" text-anchor="middle" fill="var(--lang)" font-size="10">&#53581;&#49828;&#53944; T</text>
+
+        <rect x="120" y="342" width="120" height="30" rx="5" fill="var(--panel2)" stroke="var(--lang)" stroke-dasharray="4 3"></rect>
+        <text x="180" y="361" text-anchor="middle" fill="var(--lang)" font-size="10">&#52629;&#49548;&#48376; 576</text>
+
+        <rect x="246" y="342" width="330" height="30" rx="5" fill="var(--vis-dim)" stroke="var(--vis)"></rect>
+        <text x="411" y="356" text-anchor="middle" fill="var(--vis)" font-size="10">&#53440;&#51068; &#44201;&#51088;&#47484; &#54665; &#45800;&#50948;&#47196; &#54140; &#44163; + &#54665;&#47560;&#45796; &#51460;&#48148;&#44823;</text>
+        <text x="411" y="369" text-anchor="middle" fill="var(--vis)" font-family="'IBM Plex Mono', monospace" font-size="9.5">2,304 + 48 = 2,352</text>
+
+        <text x="586" y="361" fill="var(--tx2)" font-family="'IBM Plex Mono', monospace" font-size="11">&#8594; 2,928</text>
+
+        <text x="10" y="400" fill="var(--tx2)" font-family="'IBM Plex Mono', monospace" font-size="12">(T, 4096) + (576, 4096) + (2352, 4096) &#8594; <tspan fill="var(--vis)" font-size="13">(T + 2928, 4096)</tspan></text>
+        <text x="10" y="424" fill="var(--tx2)" font-size="9.5">&#47582;&#50500;&#50556; &#54616;&#45716; &#44163;&#51008; <tspan fill="var(--vis)">&#47560;&#51648;&#47561; &#52629;&#51064; &#53945;&#51669; &#52264;&#50896; 4096&#48713;</tspan>&#51060;&#44256;, &#44803;&#51060;&#45716; &#44536;&#45367; &#45908;&#54644;&#51665;&#45768;&#45796;.</text>
+        <text x="10" y="444" fill="var(--tx3)" font-size="9.5">2,880&#51008; &#49345;&#54620;&#51077;&#45768;&#45796; &#8212; &#54056;&#46377; &#51088;&#47532;&#51032; &#53664;&#53081;&#51012; &#44148;&#50612;&#45236;&#47732;(unpad) &#44536;&#48372;&#45796; &#51201;&#50612;&#51665;&#45768;&#45796;.</text>
+      </g>
+    </svg>
+    <p class="cap">타일 토큰은 <b>타일 단위로 줄 서지 않습니다</b> — 원본 배치대로 하나의 격자로 되돌린 뒤 행 단위로 펴집니다. 격자를 1차원으로 펴는 순간 사라지는 행 경계는 <b>학습된 줄바꿈 벡터</b> 하나가 대신 표시합니다.</p>
+  </div>
+  <p>덧붙이면, 앞의 <b>"타일 경계는 공짜가 아닙니다"</b>를 여기서 한 칸 더 정밀하게 적을 수 있습니다. 경계에 걸린 물체를 <strong>인코더</strong>는 두 번에 나눠 봅니다 — 반쪽씩, 서로를 모른 채로. 그런데 <strong>LLM</strong>이 받는 것은 재조립된 격자라, 그 두 반쪽은 한 줄 안에서 바로 옆자리에 놓입니다. <strong>손실은 인코더 단계에서만 나고, 그 뒤로는 자리가 도로 붙습니다.</strong></p>
 
   <h2>4. 눌러 담기 — 압축과 정보 밀도</h2>
   <p>타일을 늘리면 토큰이 선형으로 늘고 어텐션은 제곱으로 늘어납니다. 그래서 타일링을 쓰는 모델은 거의 예외 없이 <strong>압축을 같이</strong> 씁니다. 2장에서 어댑터의 관점으로 본 것들을 여기서는 <em>예산의 관점</em>으로 다시 봅니다.</p>
@@ -494,7 +704,7 @@
     <h2>더 읽을거리</h2>
     <ol>
       <li>Liu et al., <a href="https://arxiv.org/abs/2310.03744">Improved Baselines with Visual Instruction Tuning (LLaVA-1.5)</a>, 2023 — CLIP ViT-L/14-336px 고정 입력. 논문은 해상도만 적고 토큰 수는 적지 않습니다. 576 = (336/14)²이 표로 인쇄된 곳은 <a href="https://arxiv.org/abs/2406.16860">Cambrian-1</a> Table 10과 <a href="https://llava-vl.github.io/blog/2024-05-25-llava-next-ablations/">LLaVA-NeXT 어블레이션 블로그</a>입니다.</li>
-      <li>Liu et al., <a href="https://llava-vl.github.io/blog/2024-01-30-llava-next/">LLaVA-NeXT</a>, 2024 — AnyRes 타일 배치 후보와 "픽셀 4배". 토큰 회계식 <code>L=(a×b+1)×T</code>는 <a href="https://arxiv.org/abs/2408.03326">LLaVA-OneVision</a>에, 최대 2,880이라는 수는 MM1·Cambrian-1·Idefics2에 인쇄되어 있습니다. 3-2절의 "타일은 비율 유지 + 패딩, 축소본은 찌그러뜨리기"는 논문이 아니라 구현에 적혀 있습니다 — Hugging Face <code>transformers</code>의 <a href="https://github.com/huggingface/transformers/blob/main/src/transformers/models/llava_next/image_processing_llava_next.py">image_processing_llava_next.py</a>에서 타일은 <code>_resize_for_patching</code> + <code>_pad_for_patching</code>을 거치고, 축소본은 높이·너비를 336으로 명시한 <code>resize</code> 한 번을 거칩니다.</li>
+      <li>Liu et al., <a href="https://llava-vl.github.io/blog/2024-01-30-llava-next/">LLaVA-NeXT</a>, 2024 — AnyRes 타일 배치 후보와 "픽셀 4배". 토큰 회계식 <code>L=(a×b+1)×T</code>는 <a href="https://arxiv.org/abs/2408.03326">LLaVA-OneVision</a>에, 최대 2,880이라는 수는 MM1·Cambrian-1·Idefics2에 인쇄되어 있습니다. 3-2절의 "타일은 비율 유지 + 패딩, 축소본은 찌그러뜨리기"는 논문이 아니라 구현에 적혀 있습니다 — Hugging Face <code>transformers</code>의 <a href="https://github.com/huggingface/transformers/blob/main/src/transformers/models/llava_next/image_processing_llava_next.py">image_processing_llava_next.py</a>에서 타일은 <code>_resize_for_patching</code> + <code>_pad_for_patching</code>을 거치고, 축소본은 높이·너비를 336으로 명시한 <code>resize</code> 한 번을 거칩니다. 3-4절의 재조립·unpad·<code>image_newline</code>도 같은 저장소의 <a href="https://github.com/huggingface/transformers/blob/main/src/transformers/models/llava_next/modeling_llava_next.py">modeling_llava_next.py</a>, <code>pack_image_features</code>에 있습니다.</li>
       <li>Chen et al., <a href="https://arxiv.org/abs/2404.16821">How Far Are We to GPT-4V? (InternVL 1.5)</a>, 2024 — 448px 타일 동적 분할(학습 1~12, 테스트 40), 축소본, pixel-shuffle로 타일당 256 토큰, 시각 토큰 256~3,328.</li>
       <li>Wang et al., <a href="https://arxiv.org/abs/2409.12191">Qwen2-VL</a>, 2024 — naive dynamic resolution, 2D-RoPE, 2×2 병합, 그리고 이 장 6-1의 토큰 예산 표(Table 7). 그 앞의 계보로 Dehghani et al., <a href="https://arxiv.org/abs/2307.06304">NaViT: Patch n' Pack</a>, NeurIPS 2023.</li>
       <li>압축의 계보 — Jaegle et al., <a href="https://arxiv.org/abs/2103.03206">Perceiver</a>, ICML 2021 · Alayrac et al., <a href="https://arxiv.org/abs/2204.14198">Flamingo</a>, NeurIPS 2022(64개 고정) · Laurençon et al., <a href="https://arxiv.org/abs/2405.02246">Idefics2</a>, NeurIPS 2024(729→64 학습된 풀링, "64를 넘겨도 이득 없음") · <a href="https://arxiv.org/abs/2408.12637">Idefics3</a>, 2024(리샘플러를 버리고 pixel-shuffle로, 364² → 169 토큰).</li>
