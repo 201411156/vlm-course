@@ -16,6 +16,25 @@
     border-radius:10px;padding:16px;overflow-x:auto}
   .fig svg{display:block;margin:0 auto;min-width:600px;max-width:100%;height:auto}
   .fig .cap{color:var(--tx3);font-size:12.5px;margin:12px auto 0;text-align:center;max-width:62ch}
+  /* LAB 1-2 — R·G·B 세 채널 색(다크가 기본, 라이트는 덮어씁니다) */
+  :root{--ch-r:#d97e7e;--ch-g:#7dcf8a;--ch-b:#7ba3e0}
+  :root[data-theme="light"]{--ch-r:#a63d3d;--ch-g:#2f7d3f;--ch-b:#3a5fa8}
+  @media (prefers-color-scheme:light){
+    :root:not([data-theme="dark"]){--ch-r:#a63d3d;--ch-g:#2f7d3f;--ch-b:#3a5fa8}
+  }
+  .calc{background:var(--panel2);border-radius:8px;padding:13px 15px;margin-top:18px;
+    font-family:'IBM Plex Mono',monospace;font-size:12.5px;line-height:1.95;overflow-x:auto}
+  .calc .line{display:flex;gap:8px;white-space:nowrap}
+  .calc .tag{width:20px;flex:none;font-weight:600}
+  .calc .tag.r{color:var(--ch-r)}
+  .calc .tag.g{color:var(--ch-g)}
+  .calc .tag.b{color:var(--ch-b)}
+  .calc .sum{border-top:1px solid var(--line);margin-top:8px;padding-top:8px;
+    display:flex;justify-content:space-between;gap:14px;white-space:nowrap}
+  .calc .sum b{color:var(--vis);font-size:15px}
+  .kv{display:flex;gap:20px;flex-wrap:wrap;font-family:'IBM Plex Mono',monospace;
+    font-size:12.5px;color:var(--tx2);margin-top:14px}
+  .kv b{color:var(--tx)}
 </style>
 </head>
 <body data-chapter="01">
@@ -86,6 +105,69 @@
   <p>익숙한 conv를 떠올려 보십시오. <code>kernel_size=3, stride=1</code>이면 커널이 한 픽셀씩 미끄러지며 이웃한 위치끼리 입력을 <em>겹쳐서</em> 봅니다. 출력 한 칸이 입력의 어느 조각 하나에 대응한다고 말하기 어렵습니다.</p>
   <p>patch embedding은 다릅니다. <code>kernel_size</code>와 <code>stride</code>가 둘 다 14이므로 커널이 자기 폭만큼 건너뜁니다. <strong>겹치는 구간이 0</strong>이고, 출력 한 칸이 입력의 14×14 조각 하나와 <strong>1:1로 정확히 대응</strong>합니다. 연산은 conv지만 하는 일은 <strong>잘라서 벡터로 펴기</strong>입니다 — 그래서 같은 동작을 "이미지를 조각낸다"고 설명해도 틀리지 않습니다.</p>
   <p>336px 입력이면 출력 특징맵이 24×24칸, 칸마다 채널이 1024개입니다. 공간 축 둘을 펴면 <span class="tok v">(576, 1024)</span> — <strong>토큰 576개, 각각 1024차원</strong>이 됩니다.</p>
+
+  <p>여기까지가 글로 하는 설명입니다. 그런데 커널 하나가 588개인 크기에서는 <code>Conv2d</code> 한 줄이 실제로 무엇을 곱하고 무엇을 더하는지가 눈에 들어오지 않습니다. 그래서 <strong>연산은 그대로 두고 크기만</strong> 줄였습니다 — 입력을 6×6, 커널을 2×2 네 개로 놓으면 곱셈 하나하나가 화면에 다 들어옵니다. stride를 바꿔 창이 겹치는지 아닌지도 그 자리에서 확인할 수 있습니다.</p>
+
+  <div class="lab">
+    <div class="lab-tag">LAB 1-2 · 곱셈을 눈으로 따라가기</div>
+    <h3>패치 임베딩 계산기</h3>
+    <p class="hint">크기 말고는 위에서 읽은 <code>Conv2d</code>와 똑같은 연산입니다. 세 가지를 관찰해 보세요. ① <b>전부 훑기</b>를 누르면 창이 왼쪽 위에서 오른쪽 아래로 옮겨 가며 출력 맵이 그 순서 그대로 한 칸씩 채워집니다. ② 아래 전개에서 곱셈 12번이 채널별로 접히고 마지막에 bias가 더해져 <b>값 하나</b>가 됩니다 — 커널을 #1~#4로 바꾸면 같은 자리에서 값 네 개가 나온다는 뜻입니다. ③ <b>stride를 1로 바꾸면</b> 창이 한 칸씩 겹치며 지나가고 출력이 3×3에서 5×5로 커집니다. 겹침이 사라지는 자리가 바로 stride = 커널 크기입니다.</p>
+    <canvas id="cc_cv" aria-label="입력 6×6×3에 커널 2×2×3을 한 위치씩 적용해 출력 맵을 채우는 그림"></canvas>
+    <div class="row" style="margin-top:18px">
+      <div class="ctl" style="min-width:200px">
+        <div>
+          <label>stride</label>
+          <div class="seg" id="cc_s">
+            <button type="button" data-s="2" class="sel">2 · 커널 크기</button>
+            <button type="button" data-s="1">1 · 겹침</button>
+          </div>
+        </div>
+      </div>
+      <div class="ctl" style="min-width:200px">
+        <div>
+          <label>커널 (네 개 중)</label>
+          <div class="seg" id="cc_k">
+            <button type="button" data-k="0" class="sel">#1</button>
+            <button type="button" data-k="1">#2</button>
+            <button type="button" data-k="2">#3</button>
+            <button type="button" data-k="3">#4</button>
+          </div>
+        </div>
+      </div>
+      <div class="ctl" style="min-width:200px">
+        <div>
+          <label>창의 위치</label>
+          <div class="btns">
+            <button class="btn" type="button" id="cc_prev">← 이전</button>
+            <button class="btn" type="button" id="cc_next">다음 →</button>
+            <button class="btn primary" type="button" id="cc_play">▶ 전부 훑기</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="calc" id="cc_calc"></div>
+    <div class="kv" id="cc_kv"></div>
+    <p class="hint" id="cc_note" style="margin:14px 0 0"></p>
+  </div>
+
+  <p>줄인 쪽과 실제를 나란히 놓으면 자리가 하나씩 맞아떨어집니다.</p>
+
+  <div class="tablebox">
+  <table>
+    <thead><tr><th></th><th>LAB 1-2</th><th>실제 · ViT-L/14 @336px</th></tr></thead>
+    <tbody>
+      <tr><td>입력</td><td class="num">6 × 6 × 3</td><td class="num">336 × 336 × 3</td></tr>
+      <tr><td>커널 하나</td><td class="num">2 × 2 × 3 = 12개 가중치</td><td class="num">14 × 14 × 3 = <b>588개</b></td></tr>
+      <tr><td>커널 개수</td><td class="num">4</td><td class="num"><b>1024</b> = d<sub>v</sub></td></tr>
+      <tr><td>stride</td><td class="num">2 (= 커널 크기)</td><td class="num">14 (= 커널 크기)</td></tr>
+      <tr><td>찍는 위치 수</td><td class="num">(6−2)/2+1 = 3 → 3 × 3 = <b>9</b></td><td class="num">(336−14)/14+1 = 24 → 24 × 24 = <b>576</b></td></tr>
+      <tr><td>출력</td><td class="num">(4, 3, 3)</td><td class="num">(1024, 24, 24) → 펴면 <b>(576, 1024)</b></td></tr>
+      <tr><td>학습 파라미터</td><td class="num">4 × 12 + 4 = 52</td><td class="num">1024 × 588 + 1024 = <b>603,136</b></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>두 열의 <strong>구조가 완전히 같습니다</strong>. 커널 하나의 가중치 수, 커널 개수, 찍는 위치 수, 마지막에 더하는 편향 항까지 자리가 그대로 대응하고 <strong>숫자만 커졌을 뿐</strong>입니다. 그러니 588도 1024도 새로운 연산이 아니라, 방금 손으로 따라간 곱셈과 덧셈을 크게 부풀린 것입니다.</p>
 
   <h3>2-4. 1024는 어디서 나온 숫자일까요</h3>
   <p>여기서 두 숫자의 성격이 완전히 다르다는 점을 짚어야 합니다.</p>
@@ -271,5 +353,6 @@
 <script defer src="../assets/js/glossary.js"></script>
 <script defer src="../assets/js/site.js"></script>
 <script defer src="../assets/js/labs/ch01-patch.js"></script>
+<script defer src="../assets/js/labs/ch01-convcalc.js"></script>
 </body>
 </html>
