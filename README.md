@@ -42,7 +42,7 @@ assets/js/index.js            목차 렌더
 glossary.html                 용어집 (검색·분류별 목록)
 assets/js/glossary.js         용어 데이터 131개 (표기 변형·정의·비유·첫 등장 장)
 assets/js/glossary-page.js    용어집 페이지 렌더·검색
-assets/js/labs/chNN-*.js      장별 LAB 스크립트 (23개)
+assets/js/labs/chNN-*.js      장별 LAB 스크립트 (24개)
                               ch03-webgpu.js + ch03-webgpu-worker.js 는
                               선택형 WebGPU 실습(사용자가 버튼을 눌러야 모델 다운로드)
 _headers                      Cloudflare Pages 헤더 규칙

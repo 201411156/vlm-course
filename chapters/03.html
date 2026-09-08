@@ -32,6 +32,17 @@
   .fig svg{display:block;margin:0 auto;min-width:560px;max-width:100%;height:auto}
   .fig .cap{color:var(--tx3);font-size:12.5px;margin:12px auto 0;text-align:center;max-width:60ch}
   @media (prefers-reduced-motion: reduce){ .bar i{transition:none} }
+  /* LAB 3-3 — 타일 이어 붙이기 */
+  .stat .ln{display:block;font-size:12px;color:var(--tx2);line-height:1.9}
+  .stat .ln:empty{display:none}
+  .stat .ln.warn{color:var(--lang)}
+  .stat .scale{display:block;font-size:11px;color:var(--tx3);line-height:1.7;
+    margin-top:8px;padding-top:8px;border-top:1px solid var(--line);
+    font-family:'IBM Plex Sans KR',system-ui,sans-serif}
+  .curtok{font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:var(--tx2);
+    margin:18px 0 8px}
+  .curtok b{color:var(--tx)}
+  .curtok .dim{color:var(--tx3)}
 </style>
 </head>
 <body data-chapter="03">
@@ -426,6 +437,61 @@ g h i
   </div>
   <p>덧붙이면, 앞의 <b>"타일 경계는 공짜가 아닙니다"</b>를 여기서 한 칸 더 정밀하게 적을 수 있습니다. 경계에 걸린 물체를 <strong>인코더</strong>는 두 번에 나눠 봅니다 — 반쪽씩, 서로를 모른 채로. 그런데 <strong>LLM</strong>이 받는 것은 재조립된 격자라, 그 두 반쪽은 한 줄 안에서 바로 옆자리에 놓입니다. <strong>손실은 인코더 단계에서만 나고, 그 뒤로는 자리가 도로 붙습니다.</strong></p>
 
+  <p>세 단계 모두 글로 읽으면 어긋나기 쉬운 자리입니다. 그래서 같은 일을 <strong>손으로 한 번</strong> 해보는 편이 빠릅니다. 아래 실습은 위 그림의 48×48을 8×8로 줄여 놓은 것이고, 세는 방식은 한 글자도 다르지 않습니다.</p>
+
+  <div class="lab">
+    <div class="lab-tag">LAB 3-3 · 재조립 · 패딩 제거 · 줄바꿈</div>
+    <h3>타일 이어 붙이기 시뮬레이터</h3>
+    <p class="hint">왼쪽이 원본입니다 — <b>4×4 칸짜리 타일 2×2</b>, 모두 64칸입니다. 칸의 색이 어느 타일에서 왔는지를, 칸의 번호가 그 타일의 몇 번째 칸인지를 말해 줍니다. 아래쪽 타일 두 장의 마지막 두 행은 비율을 맞추느라 채운 <b>패딩</b>이라 회색 빗금으로 그렸습니다. 아래 띠가 언어 모델이 실제로 받는 <b>1차원 시퀀스</b>입니다.</p>
+    <div class="row">
+      <div>
+        <canvas id="pk_src" width="300" height="300" aria-label="원본 격자 — 4×4 칸짜리 타일 네 장이 2×2로 놓인 8×8 격자, 아래쪽 두 타일의 마지막 두 행은 패딩"></canvas>
+        <div class="legend">
+          <span><i style="background:var(--vis)"></i>타일 ①</span>
+          <span><i style="background:var(--lang)"></i>타일 ②</span>
+          <span><i style="background:var(--ok)"></i>타일 ③</span>
+          <span><i style="background:var(--bad)"></i>타일 ④</span>
+          <span><i style="background:var(--tx3)"></i>패딩</span>
+          <span><i style="background:var(--tx)"></i>줄바꿈</span>
+        </div>
+      </div>
+      <div class="ctl">
+        <div>
+          <label>펴는 순서</label>
+          <div class="seg" id="pk_order">
+            <button type="button" data-o="tile">타일별로 통째로 (틀림)</button>
+            <button type="button" data-o="row" class="sel">행 단위로 (실제)</button>
+          </div>
+        </div>
+        <div>
+          <label><input type="checkbox" id="pk_unpad">패딩 제거 (unpad)</label>
+          <label><input type="checkbox" id="pk_nl" checked>줄바꿈 토큰 넣기</label>
+        </div>
+        <div class="btns">
+          <button class="btn" id="pk_step" type="button">한 칸씩</button>
+          <button class="btn primary" id="pk_all" type="button">전부</button>
+          <button class="btn" id="pk_reset" type="button">처음부터</button>
+        </div>
+        <div class="stat">
+          시각 토큰 <b id="pk_ntok">64</b> + 줄바꿈 <b id="pk_nnl">8</b> = 총 <b id="pk_tot">72</b>
+          <span class="ln" id="pk_rows">행 8개 · 한 행 8칸</span>
+          <span class="ln warn" id="pk_warn"></span>
+          <span class="scale">실제 축척 — 타일 24×24 × 2×2 → 48행 × 48 + ⏎ 48 = 2,352 (+ 축소본 576 = 2,928)</span>
+        </div>
+      </div>
+    </div>
+    <p class="curtok" id="pk_cur">아직 비어 있습니다 — <b>한 칸씩</b>을 눌러 첫 토큰부터 따라가 보세요.</p>
+    <canvas id="pk_seq" width="600" height="120" aria-label="1차원 시퀀스 띠 — 토큰이 순서대로 채워집니다"></canvas>
+    <p class="hint" style="margin:14px 0 0">
+      <b>무엇을 볼까요.</b>
+      <b>①</b> 순서를 <em>타일별로 통째로</em>로 바꾸면 타일 ①의 16번 칸 바로 다음에 타일 ②의 1번 칸이 옵니다. 원본에서 그 둘은 4행 4열과 1행 5열, 세 행이나 떨어진 자리인데 시퀀스에서는 바로 옆자리가 됩니다. 실제 구현이 <em>행 단위로</em>를 쓰는 이유가 이것입니다.
+      <b>②</b> <em>패딩 제거</em>를 켜면 회색 칸이 시퀀스에서 빠지면서 행 수가 8에서 6으로 줄고, 그만큼 줄바꿈도 8개에서 6개로 줄어듭니다. 걷어내는 것은 칸만이 아니라 <b>행</b>입니다.
+      <b>③</b> <em>줄바꿈 토큰</em>을 끄면 띠는 짧아지지만 어디서 줄이 바뀌었는지가 통째로 사라집니다. 8칸마다 줄이 바뀐다는 사실을 시퀀스만 보고 알아낼 방법이 없습니다.
+    </p>
+  </div>
+
+  <p>순서 토글을 두 번만 왔다 갔다 해보면 한 가지가 손에 남습니다. <strong>"이어 붙인다"는 타일을 이어 붙인다는 말이 아닙니다.</strong> 이어 붙는 것은 <em>행</em>입니다.</p>
+
   <h2>4. 눌러 담기 — 압축과 정보 밀도</h2>
   <p>타일을 늘리면 토큰이 선형으로 늘고 어텐션은 제곱으로 늘어납니다. 그래서 타일링을 쓰는 모델은 거의 예외 없이 <strong>압축을 같이</strong> 씁니다. 2장에서 어댑터의 관점으로 본 것들을 여기서는 <em>예산의 관점</em>으로 다시 봅니다.</p>
 
@@ -726,6 +792,7 @@ g h i
 <script defer src="../assets/js/glossary.js"></script>
 <script defer src="../assets/js/site.js"></script>
 <script defer src="../assets/js/labs/ch03-budget.js"></script>
+<script defer src="../assets/js/labs/ch03-pack.js"></script>
 <script defer src="../assets/js/labs/ch03-webgpu.js"></script>
 </body>
 </html>
